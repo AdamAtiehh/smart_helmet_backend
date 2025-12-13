@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Env files
+.env
+.env.*
+
+# SQLite local DB
+helmet.db
+
+# Firebase / secrets
+app/firebase/*.json
+firebase/*.json
+
+# Logs / OS
+*.log
+.DS_Store
+
+# VSCode
+.vscode/

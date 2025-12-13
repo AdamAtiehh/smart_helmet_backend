@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Helmet Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #1a1a1a;
+        }
+
+        h2 {
+            color: #4a4a4a;
+            font-size: 1.2em;
+            margin-top: 0;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .metric {
+            font-size: 2em;
+            font-weight: bold;
+            color: #2196F3;
+        }
+
+        .label {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        #log {
+            height: 300px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #00ff00;
+            padding: 15px;
+            font-family: monospace;
+            border-radius: 8px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+
+        .connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .disconnected {
+            background: #ffebee;
+            color: #c62828;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h1>Smart Helmet Dashboard</h1>
+            <div id="connectionStatus" class="status disconnected">Disconnected</div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Heart Rate</h2>
+                <div id="heartRate" class="metric">-- <span style="font-size: 0.5em;">bpm</span></div>
+            </div>
+            <div class="card">
+                <h2>GPS Location</h2>
+                <div id="gps" class="metric" style="font-size: 1.2em;">Lat: -- | Lng: --</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>G-Force (Accel)</h2>
+                <div id="accel" class="metric" style="font-size: 1.2em;">X: 0.0 | Y: 0.0 | Z: 0.0</div>
+            </div>
+            <div class="card">
+                <h2>Crash Status</h2>
+                <div id="crashStatus" class="metric" style="color: #4CAF50;">Safe</div>
+            </div>
+        </div>
+
+        <!-- NEW: Simulation Control Card -->
+        <div class="card">
+            <h2>Simulation Control</h2>
+            <div style="margin-bottom: 10px; display: flex; gap: 10px;">
+                <input type="text" id="mockDeviceId" placeholder="Device ID (e.g. helmet_001)"
+                    style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+                <input type="text" id="mockToken" placeholder="Firebase ID Token"
+                    style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; flex-grow: 1;">
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <button onclick="startMock()"
+                    style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Start
+                    Simulation</button>
+                <button onclick="stopMock()"
+                    style="padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Stop
+                    Simulation</button>
+                <span id="mockStatus" style="margin-left: 15px; color: #666; font-weight: bold;"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Live Telemetry Log</h2>
+            <div id="log"></div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2>Recent Trips</h2>
+                <button onclick="fetchTrips()"
+                    style="padding: 8px 16px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">Refresh
+                    Trips</button>
+            </div>
+            <div id="tripsList" style="margin-top: 15px;">
+                <p style="color: #666;">Loading trips...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trip Details Modal -->
+    <div id="tripModal"
+        style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000;">
+        <div
+            style="background: white; width: 80%; max-width: 600px; margin: 50px auto; padding: 20px; border-radius: 8px; position: relative;">
+            <button onclick="closeModal()"
+                style="position: absolute; top: 10px; right: 10px; border: none; background: none; font-size: 1.5em; cursor: pointer;">&times;</button>
+            <h2 id="modalTitle">Trip Details</h2>
+            <div id="modalContent"></div>
+        </div>
+    </div>
+
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8000/api/v1';
+
+        // 1. Try getting token from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        let TOKEN = urlParams.get('token');
+
+        // 2. If not in URL, try localStorage (optional, but good for refresh)
+        if (!TOKEN) {
+            TOKEN = localStorage.getItem('helmet_token');
+        } else {
+            // If in URL, save to localStorage for future use
+            localStorage.setItem('helmet_token', TOKEN);
+
+            // Optional: Cleanup URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        // 3. If still no token, redirect to login
+        if (!TOKEN) {
+            window.location.href = 'login.html';
+        }
+
+        // Connect to WebSocket with mock token
+        const ws = new WebSocket(`ws://127.0.0.1:8000/ws/stream?token=${TOKEN}`);
+        const logDiv = document.getElementById('log');
+        const statusDiv = document.getElementById('connectionStatus');
+
+        ws.onopen = () => {
+            statusDiv.textContent = 'Connected';
+            statusDiv.className = 'status connected';
+            log('System connected to telemetry stream...');
+        };
+
+        ws.onclose = () => {
+            statusDiv.textContent = 'Disconnected';
+            statusDiv.className = 'status disconnected';
+            log('Connection lost. Reconnecting...');
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            updateDashboard(data);
+            log(JSON.stringify(data, null, 2));
+        };
+
+        function updateDashboard(data) {
+            if (data.type === 'telemetry') {
+                // Update Heart Rate
+                if (data.heart_rate && data.heart_rate.hr !== undefined) {
+                    document.getElementById('heartRate').innerHTML = `${data.heart_rate.hr} <span style="font-size: 0.5em;">bpm</span>`;
+                }
+
+                // Update Crash Status
+                if (data.crash_flag) {
+                    const crashDiv = document.getElementById('crashStatus');
+                    crashDiv.textContent = 'CRASH DETECTED!';
+                    crashDiv.style.color = '#f44336';
+                }
+
+                // Update Accel (IMU)
+                if (data.imu) {
+                    document.getElementById('accel').textContent =
+                        `X: ${data.imu.ax.toFixed(2)} | Y: ${data.imu.ay.toFixed(2)} | Z: ${data.imu.az.toFixed(2)}`;
+                }
+
+                // Update GPS
+                if (data.gps) {
+                    document.getElementById('gps').textContent =
+                        `Lat: ${data.gps.lat.toFixed(4)} | Lng: ${data.gps.lng.toFixed(4)}`;
+                }
+            }
+        }
+
+        function log(msg) {
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logDiv.prepend(line);
+        }
+
+        // --- Trips API Logic ---
+
+        async function fetchTrips() {
+            const listDiv = document.getElementById('tripsList');
+            listDiv.innerHTML = '<p>Loading...</p>';
+
+            try {
+                const response = await fetch(`${API_BASE}/trips`, {
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const trips = await response.json();
+
+                if (trips.length === 0) {
+                    listDiv.innerHTML = '<p>No trips found. Start a ride to see it here!</p>';
+                    return;
+                }
+
+                let html = '<table style="width: 100%; border-collapse: collapse;">';
+                html += '<tr style="text-align: left; background: #f5f5f5;"><th style="padding: 10px;">Start Time</th><th>Status</th><th>Distance</th><th>Action</th></tr>';
+
+                trips.forEach(trip => {
+                    const date = new Date(trip.start_time).toLocaleString();
+                    const dist = trip.total_distance ? `${trip.total_distance.toFixed(2)} km` : '--';
+                    html += `
+                        <tr style="border-bottom: 1px solid #eee;">
+                            <td style="padding: 10px;">${date}</td>
+                            <td><span class="status ${trip.status === 'recording' ? 'connected' : ''}">${trip.status}</span></td>
+                            <td>${dist}</td>
+                            <td>
+                            <button onclick="viewTrip('${trip.trip_id}')" style="padding: 4px 8px; cursor: pointer;">
+                                View
+                            </button>
+
+                            ${trip.status === "recording"
+                            ? `<button 
+                                        onclick="cancelTrip('${trip.trip_id}')" 
+                                        style="padding: 4px 8px; margin-left: 6px; cursor: pointer; background: #e74c3c; color: white; border: none;">
+                                        Cancel
+                                    </button>`
+                            : ""
+                        }
+                            </td>
+
+                        </tr>
+                    `;
+                });
+                html += '</table>';
+                listDiv.innerHTML = html;
+
+            } catch (e) {
+                listDiv.innerHTML = `<p style="color: red;">Error fetching trips: ${e.message}</p>`;
+            }
+        }
+
+        async function viewTrip(tripId) {
+            const modal = document.getElementById('tripModal');
+            const content = document.getElementById('modalContent');
+            content.innerHTML = '<p>Loading details...</p>';
+            modal.style.display = 'block';
+
+            try {
+                const response = await fetch(`${API_BASE}/trips/${tripId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${TOKEN}`
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const trip = await response.json();
+
+                content.innerHTML = `
+                    <div class="grid">
+                        <div>
+                            <strong>Start Time:</strong><br>
+                            ${new Date(trip.start_time).toLocaleString()}
+                        </div>
+                        <div>
+                            <strong>End Time:</strong><br>
+                            ${trip.end_time ? new Date(trip.end_time).toLocaleString() : 'Ongoing'}
+                        </div>
+                        <div>
+                            <strong>Avg Heart Rate:</strong><br>
+                            ${trip.average_heart_rate ? trip.average_heart_rate.toFixed(0) + ' bpm' : '--'}
+                        </div>
+                        <div>
+                            <strong>Max Heart Rate:</strong><br>
+                            ${trip.max_heart_rate ? trip.max_heart_rate.toFixed(0) + ' bpm' : '--'}
+                        </div>
+                        <div>
+                            <strong>Avg Speed:</strong><br>
+                            ${trip.average_speed ? trip.average_speed.toFixed(2) + ' km/h' : '--'}
+                        </div>
+                        <div>
+                            <strong>Max Speed:</strong><br>
+                            ${trip.max_speed ? trip.max_speed.toFixed(2) + ' km/h' : '--'}
+                        </div>
+                        <div>
+                            <strong>Total Distance:</strong><br>
+                            ${trip.total_distance ? trip.total_distance.toFixed(2) + ' km' : '--'}
+                        </div>
+                        <div>
+                            <strong>Crash Detected:</strong><br>
+                            ${trip.crash_detected ? 'Yes' : 'No'}
+                        </div>
+                    </div>
+                    <div style="margin-top: 20px;">
+                        <strong>Status:</strong> ${trip.status}
+                    </div>
+                `;
+
+            } catch (e) {
+                content.innerHTML = `<p style="color: red;">Error fetching details: ${e.message}</p>`;
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('tripModal').style.display = 'none';
+        }
+
+        async function cancelTrip(tripId) {
+            if (!confirm("Are you sure you want to cancel this trip?")) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/trips/${tripId}/cancel`, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${TOKEN}`
+                    }
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || "Failed to cancel trip");
+                }
+
+                alert("Trip cancelled successfully");
+                fetchTrips(); // refresh list
+
+            } catch (e) {
+                alert("Error cancelling trip: " + e.message);
+            }
+        }
+
+
+        // --- Mock Control ---
+        async function startMock() {
+            const statusSpan = document.getElementById('mockStatus');
+            const deviceId = document.getElementById('mockDeviceId').value.trim();
+            let token = document.getElementById('mockToken').value.trim();
+
+            // Auto-fill token if empty, for convenience
+            if (!token && TOKEN) {
+                token = TOKEN;
+                document.getElementById('mockToken').value = TOKEN;
+            }
+
+            if (!deviceId || !token) {
+                alert('Please enter both Device ID and Token to start simulation.');
+                return;
+            }
+
+            statusSpan.textContent = 'Starting...';
+            try {
+                const res = await fetch(`${API_BASE}/mock/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: deviceId, token: token })
+                });
+                const data = await res.json();
+                statusSpan.textContent = `Status: ${data.status}`;
+                log(`Mock sender: ${data.status}`);
+            } catch (e) {
+                statusSpan.textContent = 'Error';
+                log(`Error starting mock: ${e}`);
+            }
+        }
+
+        async function stopMock() {
+            const statusSpan = document.getElementById('mockStatus');
+            statusSpan.textContent = 'Stopping...';
+            try {
+                const res = await fetch(`${API_BASE}/mock/stop`, { method: 'POST' });
+                const data = await res.json();
+                statusSpan.textContent = `Status: ${data.status}`;
+                log(`Mock sender: ${data.status}`);
+            } catch (e) {
+                statusSpan.textContent = 'Error';
+                log(`Error stopping mock: ${e}`);
+            }
+        }
+
+        // Load trips on startup
+        fetchTrips();
+    </script>
+
+</body>
+
+</html>
