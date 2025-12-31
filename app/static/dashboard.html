@@ -863,12 +863,12 @@
             }, 100);
         }
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log("WS type:", data.type, data);   // <-- add this
-            updateDashboard(data);
-            log(JSON.stringify(data, null, 2));
-        };
+        // ws.onmessage = (event) => {
+        //     const data = JSON.parse(event.data);
+        //     console.log("WS type:", data.type, data);   // <-- add this
+        //     updateDashboard(data);
+        //     log(JSON.stringify(data, null, 2));
+        // };
 
     </script>
 
