@@ -124,6 +124,9 @@ class TripEndIn(BaseModel):
         return v
 
 
+class VelocityData(BaseModel):
+    kmh: Optional[float] = None
+
 class TelemetryIn(BaseModel):
     """
     Nested telemetry payload.
@@ -137,8 +140,18 @@ class TelemetryIn(BaseModel):
     heart_rate: HeartRateData
     imu: IMUData
     gps: GPSData
+    velocity: Optional[VelocityData] = None
     crash_flag: bool
     trip_id: Optional[str] = None
+
+    @field_validator("velocity")
+    @classmethod
+    def validate_velocity(cls, v: Optional[VelocityData]) -> Optional[VelocityData]:
+        if v and v.kmh is not None:
+            # Ignore negative or absurdly high speed
+            if v.kmh < 0 or v.kmh > 250:
+                v.kmh = None
+        return v
 
     @field_validator("ts", mode="before")
     @classmethod

@@ -137,6 +137,7 @@ class TripData(Base):
     timestamp = Column(DateTime, index=True)
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
+    speed_kmh = Column(Float, nullable=True)
     # speed = Column(Float, nullable=True)
     # accuracy = Column(Float, nullable=True)
 
@@ -174,7 +175,7 @@ class Alert(Base):
     device_id = Column(String(64), ForeignKey("devices.device_id", ondelete="SET NULL"), index=True)
 
     ts = Column(DateTime, index=True)
-    type = Column(String(64))  # crash, high_hr, battery_low, etc.
+    alert_type = Column(String(64))
     severity = Column(String(32))  # info, warning, critical
     message = Column(Text)
     payload_json = Column(JSON)
@@ -183,3 +184,27 @@ class Alert(Base):
     resolved_by = Column(String(128), nullable=True)
 
     trip = relationship("Trip", back_populates="alerts")
+
+
+# --------------------------------------------------------------------
+# PREDICTIONS (ML outputs)
+# --------------------------------------------------------------------
+class Prediction(Base):
+    __tablename__ = "predictions"
+    __table_args__ = (
+        Index("idx_pred_trip_time", "trip_id", "ts"),
+    )
+
+    prediction_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    trip_id = Column(String(36), ForeignKey("trips.trip_id", ondelete="CASCADE"), nullable=True)
+    device_id = Column(String(64), ForeignKey("devices.device_id", ondelete="CASCADE"), index=True)
+    
+    ts = Column(DateTime, default=func.now())
+    model_name = Column(String(64))  # e.g. "baseline_v1"
+    label = Column(String(32))       # "crash", "no_crash"
+    score = Column(Float)            # 0.0 - 1.0 probability
+    
+    meta_json = Column(JSON, nullable=True) # features, etc.
+    
+    created_at = Column(DateTime, server_default=func.now())
+

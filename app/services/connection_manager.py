@@ -30,34 +30,27 @@ class ConnectionManager:
                 del self.user_connections[user_id]
                 # Clean up throttle state
                 self.user_last_sent.pop(user_id, None)
-
     async def broadcast_to_user(self, user_id: str, data: dict):
-        """
-        Send JSON data to a specific user's connections.
-        Throttled to prevent flooding.
-        """
         if user_id not in self.user_connections:
             return
 
         now = time.time()
-        last_sent = self.user_last_sent.get(user_id, 0)
+        msg_type = data.get("type")
 
-        # Simple throttling: drop message if too soon
-        # Note: For critical alerts, we might want to bypass this or have a separate queue.
-        # But for high-freq telemetry, dropping frames is acceptable.
-        if now - last_sent < self.THROTTLE_INTERVAL:
-            return
+        # Throttle only telemetry (frames can be dropped)
+        if msg_type == "telemetry":
+            last_sent = self.user_last_sent.get(user_id, 0)
+            if now - last_sent < self.THROTTLE_INTERVAL:
+                return
+            self.user_last_sent[user_id] = now
 
-        self.user_last_sent[user_id] = now
-        
-        # Send to all user's sockets
-        # Copy list to avoid modification issues during iteration
         for connection in list(self.user_connections[user_id]):
             try:
                 await connection.send_json(data)
-            except Exception:
-                # If send fails, assume disconnect and cleanup later
-                pass
+            except Exception as e:
+                print(f"[ConnectionManager] Send failed to user {user_id}: {e}")
+                # remove dead socket so it doesn't keep failing forever
+                self.disconnect(connection, user_id)
 
 # Global instance
 manager = ConnectionManager()

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db_models import Trip
 
-from sqlalchemy import select  # make sure this is imported at the top
+from sqlalchemy import select, func  # make sure this is imported at the top
 from math import radians, sin, cos, sqrt, atan2
 from app.models.db_models import Trip, TripData  # if not already imported
 
@@ -61,19 +61,36 @@ async def _compute_trip_stats(
     max_speed_kmh = 0.0
 
     prev = points[0]
+    # Updated loop with speed_kmh support
+    # We iterate and calculate speed for each segment OR use provided speed
+    
     for current in points[1:]:
+        seg_speed_kmh = 0.0
+        
+        # 1. Prefer explicit velocity
+        if current.speed_kmh is not None:
+             seg_speed_kmh = float(current.speed_kmh)
+             # We still calc distance for total_distance using GPS (Req: "distance remains computed from GPS")
+        
+        # 2. GPS Fallback / Distance Calculation
+        dist_segment_m = 0.0
         if (
             prev.lat is not None and prev.lng is not None
             and current.lat is not None and current.lng is not None
         ):
-            segment_d = haversine_m(prev.lat, prev.lng, current.lat, current.lng)
-            dt = (current.timestamp - prev.timestamp).total_seconds()
-            if dt > 0:
-                # speed in m/s -> km/h
-                seg_speed_kmh = (segment_d / dt) * 3.6
-                if seg_speed_kmh > max_speed_kmh:
-                    max_speed_kmh = seg_speed_kmh
-                total_distance_m += segment_d
+            dist_segment_m = haversine_m(prev.lat, prev.lng, current.lat, current.lng)
+            
+            # If no explicit speed, calc from GPS
+            if current.speed_kmh is None:
+                dt = (current.timestamp - prev.timestamp).total_seconds()
+                if dt > 0.5: # tolerate small drifts
+                     seg_speed_kmh = (dist_segment_m / dt) * 3.6
+        
+        # Accumulate
+        total_distance_m += dist_segment_m
+        if seg_speed_kmh > max_speed_kmh:
+            max_speed_kmh = seg_speed_kmh
+            
         prev = current
 
     # Total duration based on timestamps
@@ -284,3 +301,37 @@ class TripsRepo:
         res = await db.execute(q)
         return res.scalar_one_or_none()
 
+    @staticmethod
+    async def get_daily_aggregates(db: AsyncSession, user_id: str, date_str: str) -> dict:
+        """
+        Get aggregated stats for a specific day (date_str: YYYY-MM-DD).
+        """
+        # Cast start_time to DATE to compare with string YYYY-MM-DD
+        # or use a range check
+        
+        q = (
+            select(
+                func.avg(Trip.average_heart_rate).label("avg_hr"),
+                func.max(Trip.max_heart_rate).label("max_hr"),
+                func.avg(Trip.average_speed).label("avg_speed"),
+                func.sum(Trip.total_distance).label("total_dist"),
+                func.count(Trip.trip_id).label("trip_count")
+            )
+            .where(
+                Trip.user_id == user_id,
+                func.date(Trip.start_time) == date_str,
+                Trip.status == "completed"
+            )
+        )
+        
+        res = await db.execute(q)
+        row = res.one() # Should always return one row with nulls if no match
+        
+        return {
+            "date": date_str,
+            "average_heart_rate": row.avg_hr or 0.0,
+            "max_heart_rate": row.max_hr or 0.0,
+            "average_speed": row.avg_speed or 0.0,
+            "total_distance": row.total_dist or 0.0,
+            "total_trips": row.trip_count
+        }

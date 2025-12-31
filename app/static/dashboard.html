@@ -80,6 +80,81 @@
             background: #ffebee;
             color: #c62828;
         }
+
+        .disconnected {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        /* Tabs */
+        .tabs {
+            margin-bottom: 20px;
+        }
+
+        .tab-btn {
+            padding: 10px 20px;
+            margin-right: 10px;
+            border: none;
+            background: #e0e0e0;
+            cursor: pointer;
+            border-radius: 20px;
+            font-weight: bold;
+            color: #666;
+            transition: all 0.3s;
+        }
+
+        .tab-btn.active {
+            background: #2196F3;
+            color: white;
+        }
+
+        /* Circular Progress Styling */
+        .circle-metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .progress-ring {
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            background: conic-gradient(#2196F3 var(--progress, 0%), #e0e0e0 0deg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            margin-bottom: 10px;
+            transition: background 1s ease-out;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Inner white circle to create ring effect */
+        .progress-ring::before {
+            content: "";
+            position: absolute;
+            width: 110px;
+            height: 110px;
+            border-radius: 50%;
+            background: white;
+        }
+
+        .progress-content {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+        }
+
+        .progress-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .progress-label {
+            font-size: 0.8em;
+            color: #666;
+        }
     </style>
 </head>
 
@@ -90,55 +165,157 @@
             <div id="connectionStatus" class="status disconnected">Disconnected</div>
         </div>
 
-        <div class="grid">
-            <div class="card">
-                <h2>Heart Rate</h2>
-                <div id="heartRate" class="metric">-- <span style="font-size: 0.5em;">bpm</span></div>
-            </div>
-            <div class="card">
-                <h2>GPS Location</h2>
-                <div id="gps" class="metric" style="font-size: 1.2em;">Lat: -- | Lng: --</div>
-            </div>
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('dashboard')">Live Dashboard</button>
+            <button class="tab-btn" onclick="switchTab('history')">History</button>
         </div>
 
-        <div class="grid">
-            <div class="card">
-                <h2>G-Force (Accel)</h2>
-                <div id="accel" class="metric" style="font-size: 1.2em;">X: 0.0 | Y: 0.0 | Z: 0.0</div>
+        <!-- LIVE DASHBOARD SECTION -->
+        <div id="dashboardSection">
+
+            <!-- Alerts Section -->
+            <div class="card" id="alertsCard" style="display: none; border-left: 5px solid #f44336;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h2 style="color: #f44336; margin:0;">⚠️ Alerts</h2>
+                    <button onclick="loadAlerts()"
+                        style="padding: 5px 10px; background: #eee; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;">
+                        Refresh
+                    </button>
+                </div>
+                <div id="alertsList" style="margin-top: 15px; max-height: 300px; overflow-y: auto;">
+                    <!-- Alerts injected here -->
+                </div>
             </div>
+
+            <div class="grid">
+                <div class="card">
+                    <h2>Heart Rate</h2>
+                    <div id="heartRate" class="metric">-- <span style="font-size: 0.5em;">bpm</span></div>
+                </div>
+                <div class="card">
+                    <h2>GPS Location</h2>
+                    <div id="gps" class="metric" style="font-size: 1.2em;">Lat: -- | Lng: --</div>
+                    <div id="velocity" class="metric" style="font-size: 1.0em; margin-top:5px; color:#555;">Speed: --
+                        km/h</div>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <h2>G-Force (Accel)</h2>
+                    <div id="accel" class="metric" style="font-size: 1.2em;">X: 0.0 | Y: 0.0 | Z: 0.0</div>
+                </div>
+                <div class="card">
+                    <h2>Crash Status</h2>
+                    <div id="crashStatus" class="metric" style="color: #4CAF50;">Safe</div>
+                </div>
+                <div class="card">
+                    <h2>Driving Risk</h2>
+                    <div id="riskLevel" class="metric" style="color: #4CAF50;">NORMAL</div>
+                    <div style="margin-top:5px; font-size:0.9em; color:#666;">
+                        Score: <span id="riskScore">0</span>
+                        <span id="riskSpeedWrapper" style="display:none; margin-left:10px;">
+                            (<span id="riskSpeed"></span> km/h)
+                        </span>
+                    </div>
+                    <div id="riskReasons" style="margin-top:5px; font-size:0.85em; color:#f44336; min-height: 1.2em;">
+                    </div>
+                </div>
+            </div>
+
+            <!-- NEW: Simulation Control Card -->
             <div class="card">
-                <h2>Crash Status</h2>
-                <div id="crashStatus" class="metric" style="color: #4CAF50;">Safe</div>
+                <h2>Simulation Control</h2>
+                <div style="margin-bottom: 10px; display: flex; gap: 10px;">
+                    <input type="text" id="mockDeviceId" placeholder="Device ID (e.g. helmet_001)"
+                        style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+                    <input type="text" id="mockToken" placeholder="Firebase ID Token"
+                        style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; flex-grow: 1;">
+                </div>
+                <div style="display: flex; gap: 10px; align-items: center;">
+                    <button onclick="startMock()"
+                        style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Start
+                        Simulation</button>
+                    <button onclick="stopMock()"
+                        style="padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Stop
+                        Simulation</button>
+                    <span id="mockStatus" style="margin-left: 15px; color: #666; font-weight: bold;"></span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Live Telemetry Log</h2>
+                <div id="log"></div>
             </div>
         </div>
+    </div> <!-- End dashboardSection -->
 
-        <!-- NEW: Simulation Control Card -->
+    <!-- HISTORY SECTION -->
+    <div id="historySection" style="display: none;">
         <div class="card">
-            <h2>Simulation Control</h2>
-            <div style="margin-bottom: 10px; display: flex; gap: 10px;">
-                <input type="text" id="mockDeviceId" placeholder="Device ID (e.g. helmet_001)"
-                    style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
-                <input type="text" id="mockToken" placeholder="Firebase ID Token"
-                    style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; flex-grow: 1;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2>Daily History</h2>
+                <div>
+                    <input type="date" id="historyDate"
+                        style="padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <button onclick="fetchHistory()"
+                        style="padding: 8px 16px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                        Load
+                    </button>
+                </div>
             </div>
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <button onclick="startMock()"
-                    style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Start
-                    Simulation</button>
-                <button onclick="stopMock()"
-                    style="padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">Stop
-                    Simulation</button>
-                <span id="mockStatus" style="margin-left: 15px; color: #666; font-weight: bold;"></span>
-            </div>
-        </div>
 
-        <div class="card">
-            <h2>Live Telemetry Log</h2>
-            <div id="log"></div>
+            <div id="historyContent" style="display: none;">
+                <div class="grid" style="justify-items: center;">
+
+                    <!-- Avg Heart Rate -->
+                    <div class="circle-metric">
+                        <div class="progress-ring" id="hist-hr-ring" style="--progress: 0%;">
+                            <div class="progress-content">
+                                <div class="progress-value" id="hist-avg-hr">--</div>
+                                <div class="progress-label">Avg BPM</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 0.9em; color: #666;">Max: <span id="hist-max-hr"
+                                style="font-weight: bold;">--</span></div>
+                    </div>
+
+                    <!-- Avg Speed -->
+                    <div class="circle-metric">
+                        <div class="progress-ring" id="hist-speed-ring"
+                            style="--progress: 0%; background: conic-gradient(#4CAF50 var(--progress, 0%), #e0e0e0 0deg);">
+                            <div class="progress-content">
+                                <div class="progress-value" id="hist-avg-speed">--</div>
+                                <div class="progress-label">Avg km/h</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Total Distance -->
+                    <div class="circle-metric">
+                        <div class="progress-ring" id="hist-dist-ring"
+                            style="--progress: 0%; background: conic-gradient(#FF9800 var(--progress, 0%), #e0e0e0 0deg);">
+                            <div class="progress-content">
+                                <div class="progress-value" id="hist-total-dist">--</div>
+                                <div class="progress-label">Total km</div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <div style="text-align: center; margin-top: 30px; font-size: 1.1em; color: #555;">
+                    <p>Total Trips: <span id="hist-total-trips" style="font-weight: bold;">0</span></p>
+                </div>
+            </div>
+
+            <div id="historyEmpty" style="text-align: center; padding: 40px; color: #888;">
+                Select a date to view history.
+            </div>
         </div>
     </div>
 
-    <div class="container">
+    <div class="container" id="recentTripsSection">
         <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center;">
                 <h2>Recent Trips</h2>
@@ -172,6 +349,12 @@
         // 1. Try getting token from URL
         const urlParams = new URLSearchParams(window.location.search);
         let TOKEN = urlParams.get('token');
+
+        // ws.onmessage = (event) => {
+        //     console.log("WS RAW:", event.data);   // <--- add this
+        //     const data = JSON.parse(event.data);
+        //     updateDashboard(data);
+        // };
 
         // 2. If not in URL, try localStorage (optional, but good for refresh)
         if (!TOKEN) {
@@ -237,6 +420,60 @@
                     document.getElementById('gps').textContent =
                         `Lat: ${data.gps.lat.toFixed(4)} | Lng: ${data.gps.lng.toFixed(4)}`;
                 }
+
+                // Update Velocity
+                if (data.velocity && data.velocity.kmh !== undefined) {
+                    document.getElementById('velocity').textContent = `Speed: ${data.velocity.kmh.toFixed(1)} km/h`;
+                }
+
+                if (data.type === "RISK_STATUS") {
+                    console.log("GOT RISK:", data);   // <--- add this
+                }
+            } else if (data.type === 'ALERT_CRITICAL') {
+                // Handle Critical Alert Broadcast
+                // Show notification and reload alerts
+                log(`🚨 CRITICAL ALERT: ${data.payload.message}`);
+
+                // Show Alerts card if hidden
+                const alertsCard = document.getElementById('alertsCard');
+                alertsCard.style.display = 'block';
+                alertsCard.scrollIntoView({ behavior: 'smooth' });
+
+                // Reload list to get the new alert properly formatted from DB
+                loadAlerts();
+
+                // Optional: Browser notification or Toast could go here
+                alert(`🚨 CRITICAL ALERT!\n${data.payload.message}`);
+
+            } else if (data.type === 'RISK_STATUS') {
+                const p = data.payload;
+                const levelEl = document.getElementById('riskLevel');
+
+                levelEl.textContent = p.level;
+                document.getElementById('riskScore').textContent = p.score;
+
+                // Colors
+                if (p.level === 'NORMAL') levelEl.style.color = '#4CAF50';
+                else if (p.level === 'RISKY') levelEl.style.color = '#ff9800';
+                else if (p.level === 'DANGEROUS') levelEl.style.color = '#f44336';
+                else levelEl.style.color = '#666';
+
+                // Reasons
+                const reasonsEl = document.getElementById('riskReasons');
+                if (p.reasons && p.reasons.length > 0) {
+                    reasonsEl.textContent = p.reasons.join(', ');
+                } else {
+                    reasonsEl.textContent = '';
+                }
+
+                // Speed
+                const speedWrap = document.getElementById('riskSpeedWrapper');
+                if (p.speed_kmh) {
+                    speedWrap.style.display = 'inline';
+                    document.getElementById('riskSpeed').textContent = p.speed_kmh;
+                } else {
+                    speedWrap.style.display = 'none';
+                }
             }
         }
 
@@ -245,6 +482,95 @@
             line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
             logDiv.prepend(line);
         }
+
+        // --- Alerts Logic ---
+        async function loadAlerts() {
+            const listDiv = document.getElementById('alertsList');
+            const cardStats = document.getElementById('alertsCard');
+
+            // Fixed: Always show the card when loading, so user sees "No alerts" if empty
+            cardStats.style.display = 'block';
+
+            try {
+                const res = await fetch(`${API_BASE}/alerts?limit=50`, {
+                    headers: { 'Authorization': `Bearer ${TOKEN}` }
+                });
+                if (!res.ok) throw new Error("Failed to fetch alerts");
+
+                const alerts = await res.json();
+
+                if (alerts.length > 0) {
+                    renderAlerts(alerts);
+                } else {
+                    listDiv.innerHTML = '<p style="color:#666; font-style:italic;">No active alerts.</p>';
+                }
+            } catch (e) {
+                console.error(e);
+                log(`Error loading alerts: ${e.message}`);
+                listDiv.innerHTML = `<p style="color:red;">Error: ${e.message}</p>`;
+            }
+        }
+
+        function renderAlerts(alerts) {
+            const listDiv = document.getElementById('alertsList');
+            let html = '';
+
+            alerts.forEach(alert => {
+                const ts = new Date(alert.ts).toLocaleString();
+                // Fixed: Use resolved_at to determine status
+                const isResolved = !!alert.resolved_at;
+                const statusText = isResolved ? "resolved" : "unresolved";
+
+                // Fixed: 3 levels of severity styling
+                let borderSide = '5px solid #ccc'; // default info
+                if (alert.severity === 'warning') borderSide = '5px solid #ff9800'; // orange
+                if (alert.severity === 'critical') borderSide = '5px solid #f44336'; // red
+
+                const bg = isResolved ? '#f9f9f9' : '#fff0f0';
+
+                html += `
+                <div style="background: ${bg}; border-left: ${borderSide}; padding: 10px; margin-bottom: 10px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <div style="display: flex; justify-content: space-between;">
+                        <strong>${alert.alert_type}</strong>
+                        <span style="font-size: 0.8em; color: #666;">${ts}</span>
+                    </div>
+                    <div style="margin: 5px 0;">${alert.message}</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                        <span class="status" style="font-weight:normal; font-size: 0.8em; background: ${isResolved ? '#e8f5e9' : '#ffebee'}; color: ${isResolved ? '#2e7d32' : '#c62828'};">
+                            ${statusText}
+                        </span>
+                        ${!isResolved ?
+                        `<button onclick="acknowledgeAlert('${alert.alert_id}')" 
+                                style="padding: 5px 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                                Acknowledge
+                            </button>`
+                        : ''
+                    }
+                    </div>
+                </div>
+                `;
+            });
+
+            listDiv.innerHTML = html;
+        }
+
+        async function acknowledgeAlert(alertId) {
+            try {
+                const res = await fetch(`${API_BASE}/alerts/${alertId}/ack`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${TOKEN}` }
+                });
+                if (!res.ok) throw new Error("Failed to ack");
+
+                // Refresh list
+                loadAlerts();
+            } catch (e) {
+                alert(`Error: ${e.message}`);
+            }
+        }
+
+        // Initial load of alerts
+        loadAlerts();
 
         // --- Trips API Logic ---
 
@@ -449,6 +775,101 @@
 
         // Load trips on startup
         fetchTrips();
+
+        // --- History Logic ---
+        function switchTab(tab) {
+            const dashSection = document.getElementById('dashboardSection');
+            const histSection = document.getElementById('historySection');
+            const tripsSection = document.getElementById('recentTripsSection');
+            const btns = document.querySelectorAll('.tab-btn');
+
+            if (tab === 'dashboard') {
+                dashSection.style.display = 'block';
+                tripsSection.style.display = 'block';
+                histSection.style.display = 'none';
+                btns[0].classList.add('active');
+                btns[1].classList.remove('active');
+            } else {
+                dashSection.style.display = 'none';
+                tripsSection.style.display = 'none';
+                histSection.style.display = 'block';
+                btns[0].classList.remove('active');
+                btns[1].classList.add('active');
+
+                // Set today as default if empty
+                if (!document.getElementById('historyDate').value) {
+                    document.getElementById('historyDate').valueAsDate = new Date();
+                }
+            }
+        }
+
+        async function fetchHistory() {
+            const dateVal = document.getElementById('historyDate').value;
+            if (!dateVal) {
+                alert("Please select a date");
+                return;
+            }
+
+            const contentDiv = document.getElementById('historyContent');
+            const emptyDiv = document.getElementById('historyEmpty');
+
+            try {
+                const response = await fetch(`${API_BASE}/history/daily?date=${dateVal}`, {
+                    headers: { 'Authorization': `Bearer ${TOKEN}` }
+                });
+
+                if (!response.ok) throw new Error("Failed to fetch history");
+
+                const data = await response.json();
+
+                emptyDiv.style.display = 'none';
+                contentDiv.style.display = 'block';
+
+                // Render metrics
+                renderCircle('hist-hr-ring', 'hist-avg-hr', data.average_heart_rate, 200, ''); // Max HR realistic ~200
+                document.getElementById('hist-max-hr').textContent = data.max_heart_rate.toFixed(0);
+
+                renderCircle('hist-speed-ring', 'hist-avg-speed', data.average_speed, 60, ''); // Max speed ~60km/h
+
+                renderCircle('hist-dist-ring', 'hist-total-dist', data.total_distance, 100, ''); // Target 100km? (Arbitrary scale)
+
+                document.getElementById('hist-total-trips').textContent = data.total_trips;
+
+            } catch (e) {
+                alert(e.message);
+                console.error(e);
+            }
+        }
+
+        function renderCircle(ringId, valueId, value, max, unit) {
+            const ring = document.getElementById(ringId);
+            const valEl = document.getElementById(valueId);
+
+            // Format value
+            const displayVal = value ? value.toFixed(1) : "0";
+            valEl.textContent = displayVal + unit;
+
+            // Calc percentage
+            let pct = 0;
+            if (value && max) {
+                pct = (value / max) * 100;
+                if (pct > 100) pct = 100;
+            }
+
+            // Update CSS variable for conic-gradient
+            // Use setTimeout to trigger transition if initially hidden
+            setTimeout(() => {
+                ring.style.setProperty('--progress', `${pct}%`);
+            }, 100);
+        }
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log("WS type:", data.type, data);   // <-- add this
+            updateDashboard(data);
+            log(JSON.stringify(data, null, 2));
+        };
+
     </script>
 
 </body>

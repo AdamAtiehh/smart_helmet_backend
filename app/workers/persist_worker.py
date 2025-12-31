@@ -12,14 +12,56 @@ from app.repositories.trips_repo import create_trip, close_trip, get_active_trip
 from app.repositories.telemetry_repo import insert_trip_data
 from app.repositories.alerts_repo import insert_alert
 from app.repositories.trips_repo import get_trip_by_id
+from app.repositories.predictions_repo import insert_prediction
+from app.ml.predictor import predict_crash
+from app.services.connection_manager import manager
+from app.services.risk_assessor import RiskAssessor
+
+from collections import deque
+from enum import Enum
+import time
+
+class CrashState(Enum):
+    NORMAL = "normal"
+    INVESTIGATING = "investigating"
+
+# Configuration
+RING_BUFFER_SIZE = 30
+POST_WINDOW_SIZE = 20
+COOLDOWN_SECONDS = 10.0
+
+# In-memory state per trip_id
+# Structure: trip_id -> {
+#   "state": CrashState,
+#   "ring_buffer": deque(maxlen=RING_BUFFER_SIZE),
+#   "post_buffer": list,  # collects samples during investigating
+#   "pre_window": list,   # snapshot of ring buffer at trigger
+#   "last_trigger_ts": float 
+# }
+_TRIP_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 
 # Single in-process queue for persistence work
 _QUEUE: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=10_000)
 
+# ------------------------------------------------------------------------------
+# NOTE: This worker relies on in-memory state (_TRIP_STATE, _RISK_STATE).
+# It MUST run in a SINGLE PROCESS (uvicorn workers=1) to work correctly.
+# If multiple workers are used, state will be fragmented and features will break.
+# ------------------------------------------------------------------------------
+
 # Active trip map (device_id -> trip_id). In-memory; persist later if needed.
 _ACTIVE_TRIP: dict[str, str] = {}
+
+# In-memory risk state per trip_id
+# Structure: trip_id -> {
+#   "ring_buffer": deque(maxlen=20),
+#   "last_gps": {"lat": float, "lng": float, "ts": str} or None,
+#   "last_sent_ts": float,
+#   "user_id": str or None
+# }
+_RISK_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 async def enqueue_persist(msg: Dict[str, Any]) -> None:
@@ -97,6 +139,9 @@ async def _handle_trip_start(payload: TripStartIn) -> None:
                 end_lng=end_lng,
                 crash_detected=None
             )
+            # Cleanup state for the closed trip
+            _TRIP_STATE.pop(existing_trip.trip_id, None)
+            _RISK_STATE.pop(existing_trip.trip_id, None)
 
         if not device.user_id:
             print(f"[persist] WARNING: Creating trip for device {payload.device_id} with NO USER linked!")
@@ -110,6 +155,7 @@ async def _handle_trip_start(payload: TripStartIn) -> None:
             # start_time=payload.ts,
         )
         # Map device -> active trip
+        _ACTIVE_TRIP[payload.device_id] = trip.trip_id
         await db.commit()
 
 
@@ -152,7 +198,12 @@ async def _handle_telemetry(payload: TelemetryIn) -> None:
                 start_time=payload.ts,
             )
             trip_id = trip.trip_id
+            _ACTIVE_TRIP[payload.device_id] = trip_id
             # no commit yet, we’ll commit after inserting trip_data
+
+        v_kmh = None
+        if payload.velocity and payload.velocity.kmh is not None:
+             v_kmh = payload.velocity.kmh
 
         # Flatten blocks for DB insert
         await insert_trip_data(
@@ -162,12 +213,217 @@ async def _handle_telemetry(payload: TelemetryIn) -> None:
             trip_id=trip_id,
             lat=payload.gps.lat,
             lng=payload.gps.lng,
+            speed_kmh=v_kmh,
             acc_x=payload.imu.ax, acc_y=payload.imu.ay, acc_z=payload.imu.az,
             gyro_x=payload.imu.gx, gyro_y=payload.imu.gy, gyro_z=payload.imu.gz,
             heart_rate=payload.heart_rate.hr,
             crash_flag=payload.crash_flag,
         )
         await db.commit()
+
+        # -----------------------------
+        # DRIVING RISK PIPELINE
+        # -----------------------------
+        if trip_id not in _RISK_STATE:
+            _RISK_STATE[trip_id] = {
+                "ring_buffer": deque(maxlen=20),
+                "last_gps": None,
+                "last_sent_ts": 0.0,
+                "user_id": None
+            }
+        
+        risk_state = _RISK_STATE[trip_id]
+        
+        # Cache user_id if missing (try device owner logic from before)
+        # We know device object might have user_id if we fetched it, 
+        # but 'device' variable scope above is closed? No, it's in async with block?
+        # Actually 'device' is available inside the block above (lines 164-200).
+        # But we are outside the block?
+        # Wait, the indentation suggests we are inside `async with get_db_context() as db:` block?
+        # Line 200 `await db.commit()` is indented.
+        # My replacement is AFTER line 200. I should match indentation.
+        
+        # Populate user_id cache if needed
+        if not risk_state["user_id"] and device.user_id:
+             risk_state["user_id"] = device.user_id
+             
+        # Add to ring buffer
+        risk_msg = payload.model_dump()
+        risk_state["ring_buffer"].append(risk_msg)
+        
+        now_ts = time.time()
+        
+        # Throttle: 1 sec
+        if (now_ts - risk_state["last_sent_ts"]) >= 1.0:
+            # Assess Risk
+            assessment = RiskAssessor.assess_risk(
+                list(risk_state["ring_buffer"]),
+                risk_state["last_gps"]
+            )
+            
+            # Broadcast if we have a user
+            uid = risk_state["user_id"]
+            if not uid:
+                # Last ditch effort: try resolving from DB if we really need to?
+                # or just skip. We really need user_id to broadcast.
+                # If 'device.user_id' was None, maybe trip has it?
+                # We can try to query trip if we are still in DB session?
+                # Yes, we are.
+                if not uid:
+                     t_row = await get_trip_by_id(db, trip_id)
+                     if t_row and t_row.user_id:
+                         uid = t_row.user_id
+                         risk_state["user_id"] = uid
+            
+            if uid:
+                conns = len(manager.user_connections.get(uid, []))
+                print(f"[Risk] Broadcast to {uid} (Connections: {conns}) Level={assessment['level']}")
+                
+                # Make payload JSON-safe (handle datetimes/enums if any)
+                safe_payload = json.loads(json.dumps(assessment, default=str))
+                
+                await manager.broadcast_to_user(uid, {
+                    "type": "RISK_STATUS",
+                    "payload": safe_payload
+                })
+            
+            # Update state
+            risk_state["last_sent_ts"] = now_ts
+            
+            # Update last_gps if current msg has valid GPS
+            if payload.gps and payload.gps.ok and payload.gps.lat:
+                risk_state["last_gps"] = {
+                    "lat": payload.gps.lat,
+                    "lng": payload.gps.lng,
+                    "ts": payload.ts # store original TS for Haversine delta
+                }
+
+        # -----------------------------
+        # CRASH DETECTION PIPELINE
+        # -----------------------------
+        # 1. Init state if needed
+        if trip_id not in _TRIP_STATE:
+            _TRIP_STATE[trip_id] = {
+                "state": CrashState.NORMAL,
+                "ring_buffer": deque(maxlen=RING_BUFFER_SIZE),
+                "post_buffer": [],
+                "pre_window": [],
+                "last_trigger_ts": 0.0
+            }
+        
+        trip_state = _TRIP_STATE[trip_id]
+        
+        # Convert payload to strict dict for buffering/prediction
+        # We need to preserve the structure expected by predictor.py
+        msg_dict = payload.model_dump()
+        
+        # 2. Update Ring Buffer (always, in NORMAL state)
+        # In INVESTIGATING, we might arguably pause ring buffer updates or continue?
+        # Usually we continue so we don't lose data if we reset.
+        trip_state["ring_buffer"].append(msg_dict)
+        
+        current_ts = time.time()
+        
+        # 3. State Machine
+        if trip_state["state"] == CrashState.NORMAL:
+            # Check trigger
+            if payload.crash_flag:
+                # Check cooldown
+                if (current_ts - trip_state["last_trigger_ts"]) > COOLDOWN_SECONDS:
+                    print(f"[Crash] Triggered for trip {trip_id}. Investigating...")
+                    trip_state["state"] = CrashState.INVESTIGATING
+                    trip_state["last_trigger_ts"] = current_ts
+                    
+                    # Snapshot pre-window
+                    # Issue 1 Fix: Exclude current msg_dict from pre_window to avoid duplicate
+                    trip_state["pre_window"] = list(trip_state["ring_buffer"])[:-1]
+                    # Start post-buffer with CURRENT message
+                    trip_state["post_buffer"] = [msg_dict]
+                else:
+                    print(f"[Crash] Cooldown active for trip {trip_id}. Ignoring trigger.")
+                    
+        elif trip_state["state"] == CrashState.INVESTIGATING:
+            # Collect post-window samples
+            trip_state["post_buffer"].append(msg_dict)
+            
+            if len(trip_state["post_buffer"]) >= POST_WINDOW_SIZE:
+                # Ready to predict
+                full_window = trip_state["pre_window"] + trip_state["post_buffer"]
+                
+                print(f"[Crash] Running inference on {len(full_window)} samples...")
+                
+                # Run Fake ML
+                result = predict_crash(full_window)
+                # result = { "label": "crash"/"no_crash", "prob": float, "model": ... }
+                
+                # Persist Prediction
+                pred_label = result.get("label", "unknown")
+                pred_prob = result.get("prob", 0.0)
+                model_name = result.get("model", "unknown")
+                
+                # We need a fresh DB session or reuse existing? 
+                # The existing 'db' context is closed/committed above.
+                # We should open a new one or move commit to end. 
+                # actually 'db' scope ended at line 170? 
+                # Wait, line 136 `async with get_db_context() as db:` covers this entire block?
+                # The indentation in the replacement must match.
+                # My replacement effectively is OUTSIDE the `async with` block if I unindent?
+                # No, I should keep it separate or reuse.
+                # Since line 170 `await db.commit()` is the end of the block in original file.
+                # I will create a new transaction for the prediction/alert to ensure atomicity 
+                # and avoid "session closed" errors if I reuse `db` after commit.
+                
+                async with get_db_context() as pred_db:
+                    await insert_prediction(
+                        pred_db,
+                        device_id=payload.device_id,
+                        trip_id=trip_id,
+                        model_name=model_name,
+                        label=pred_label,
+                        score=pred_prob,
+                        ts=payload.ts,
+                        meta_json={"window_size": len(full_window)}
+                    )
+                    
+                    if pred_label == "crash":
+                        print(f"[Crash] CONFIRMED crash (prob={pred_prob:.2f})!")
+
+                        # Optimization: get user_id from arguments if possible, but payload doesn't have it.
+                        # We can fetch it.
+                        trip_row = await get_trip_by_id(pred_db, trip_id)
+                        user_id = trip_row.user_id if trip_row else None
+                        
+                        # 1. Create Alert in DB
+                        alert = await insert_alert(
+                            pred_db,
+                            device_id=payload.device_id,
+                            trip_id=trip_id,
+                            ts=payload.ts,
+                            alert_type="crash_server",
+                            severity="critical",
+                            message=f"Crash detected with {pred_prob:.0%} confidence.",
+                            user_id=user_id,
+                            payload_json=result
+                        )
+                        
+                        # 2. Broadcast via Websocket
+                        if user_id:
+                            await manager.broadcast_to_user(user_id, {
+                                "type": "ALERT_CRITICAL",
+                                "payload": {
+                                    "alert_id": alert.alert_id,
+                                    "message": alert.message,
+                                    "device_id": payload.device_id,
+                                    "ts": payload.ts.isoformat()
+                                }
+                            })
+
+                    await pred_db.commit()
+                
+                # Reset State
+                trip_state["state"] = CrashState.NORMAL
+                trip_state["post_buffer"] = []
+                trip_state["pre_window"] = []
 
 
 async def _handle_trip_end(payload: TripEndIn) -> None:
@@ -188,7 +444,9 @@ async def _handle_trip_end(payload: TripEndIn) -> None:
         )
         await db.commit()
 
-    # Optional: keep cache clean if you still store it elsewhere
+    # Clear runtime state and active trip cache
+    _TRIP_STATE.pop(trip_id, None)
+    _RISK_STATE.pop(trip_id, None)
     _ACTIVE_TRIP.pop(payload.device_id, None)
 
 

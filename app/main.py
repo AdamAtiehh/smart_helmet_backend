@@ -52,47 +52,42 @@ async def root():
     with open("app/static/login.html", encoding="utf-8") as f:
         return f.read()
 
-
 @app.websocket("/ws/stream")
-async def ws_stream(
-    websocket: WebSocket, 
-    token: str = Query(None)
-):
-    """
-    Real-time stream for dashboards.
-    Clients connect here to receive live telemetry.
-    Authenticated and scoped to the user's devices.
-    """
+async def ws_stream(websocket: WebSocket, token: str = Query(None)):
     from app.services.auth import verify_firebase_token
     from app.repositories.users_repo import UsersRepo
     from app.database.connection import get_db_context
-    
-    user_id = None
+
+    if not token:
+        await websocket.close(code=1008, reason="Missing token")
+        return
+
     try:
-        if not token:
-            await websocket.close(code=1008, reason="Missing token")
-            return
-            
         decoded = await verify_firebase_token(token)
         firebase_uid = decoded.get("uid")
 
-        # Resolve internal user_id
         async with get_db_context() as db:
             user = await UsersRepo.create_user(db, firebase_uid=firebase_uid)
             user_id = user.user_id
 
+        print(f"[ws_stream] Connected user_id={user_id} (firebase_uid={firebase_uid})")
+
     except Exception as e:
-        # print(f"[ws_stream] Auth failed: {e}")
+        print(f"[ws_stream] Auth failed: {repr(e)}")
         await websocket.close(code=1008, reason="Invalid token")
         return
 
+    # ✅ DO NOT accept here
     await manager.connect(websocket, user_id)
+
     try:
         while True:
-            # Keep connection alive
-            await websocket.receive_text()
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket, user_id)
+
 
 # Simple cache for device ownership to avoid DB hits on every packet
 # Map device_id -> user_id
@@ -104,9 +99,6 @@ async def ws_ingest(websocket: WebSocket):
     from app.database.connection import get_db_context
 
     await websocket.accept()
-
-    # Track which device is using this WS connection.
-    # If the socket drops without a trip_end, we auto-close the active trip for this device.
     last_device_id: str | None = None
 
     try:
@@ -128,7 +120,6 @@ async def ws_ingest(websocket: WebSocket):
                 elif msg_type == "trip_end":
                     obj = TripEndIn(**payload)
                 else:
-                    # Only try to respond if still connected
                     try:
                         await websocket.send_text("❌ error: unknown type")
                     except Exception:
@@ -138,7 +129,7 @@ async def ws_ingest(websocket: WebSocket):
                 # 1) enqueue persistence
                 await enqueue_persist(obj.model_dump())
 
-                # 2) broadcast to device owner (unchanged)
+                # 2) broadcast to owner (non-blocking)
                 if device_id:
                     owner_id = _DEVICE_OWNER_CACHE.get(device_id)
                     if not owner_id:
@@ -148,24 +139,17 @@ async def ws_ingest(websocket: WebSocket):
                                 owner_id = device.user_id
                                 _DEVICE_OWNER_CACHE[device_id] = owner_id
                     if owner_id:
-                        try:
-                            # fire-and-forget so ingest never gets blocked by dashboard streaming
-                            asyncio.create_task(manager.broadcast_to_user(owner_id, payload))
-                        except Exception as e:
-                            print(f"[ws/ingest] broadcast error: {e}")
+                        asyncio.create_task(manager.broadcast_to_user(owner_id, payload))
 
-
-                # # ACK back to sender (but don’t crash if disconnected)
-                # try:
-                #     await websocket.send_text("✅ saved")
-                # except Exception:
-                #     break
+                # 3) ACK (needed by mock sender)
+                try:
+                    await websocket.send_text("✅ saved")
+                except Exception:
+                    break
 
             except WebSocketDisconnect:
                 break
-
             except Exception as e:
-                # Don’t try to send if the socket is already gone
                 try:
                     await websocket.send_text(f"❌ error: {str(e)}")
                 except Exception:
@@ -174,7 +158,6 @@ async def ws_ingest(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        # If the connection drops without a trip_end, auto-close the active trip.
         if last_device_id:
             try:
                 await enqueue_persist({
@@ -183,7 +166,6 @@ async def ws_ingest(websocket: WebSocket):
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
-                # Don't let cleanup crash the server
                 pass
 
 
