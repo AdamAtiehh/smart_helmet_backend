@@ -1,133 +1,140 @@
-Smart Helmet Backend
---------------------
+# Smart Helmet Backend 🏍️🪖
 
-Backend system for a real-time motorcycle safety helmet using FastAPI, WebSockets, ML inference, and SQLite/MySQL.
+A real-time backend for a motorcycle safety helmet system built with **FastAPI**, **WebSockets**, and **async SQLAlchemy**.
 
-This service receives telemetry from the helmet (via Raspberry Pi → mobile app → backend), stores trip data, and streams live updates to the user dashboard. It also includes background workers for data persistence and (later) machine-learning-based crash detection.
+This service ingests live telemetry (GPS, IMU, heart rate, speed), persists it efficiently using a background queue worker, and streams updates to an authenticated user dashboard in real time. It also includes a risk pipeline and a server-side crash inference flow (ONNX-ready) to support safety alerts.
 
----------------------------------------------------
-Project Structure
----------------------------------------------------
+---
 
-smart_helmet_backend/
+## What this backend does
 
-├── app/
-│   ├── main.py                 – FastAPI app entrypoint (REST + WebSockets + workers)
-│   │
-│   ├── models/
-│   │   ├── db_models.py        – SQLAlchemy ORM models
-│   │   └── schemas.py          – Pydantic request/response models
-│   │
-│   ├── database/
-│   │   └── connection.py       – Async SQLAlchemy engine + session handling
-│   │
-│   ├── workers/
-│   │   ├── persist_worker.py   – Background queue → saves telemetry/trips
-│   │   └── inference_worker.py – (Future) ML model inference worker
-│   │
-│   ├── ml/
-│   │   ├── model.onnx          – Placeholder for crash-detection ML model
-│   │   └── predictor.py        – Runs ONNX model
-│   │
-│   ├── services/
-│   │   ├── connection_manager.py – Tracks connected WebSocket users
-│   │   └── broadcaster.py        – Sends real-time updates to /ws/stream
-│   │
-│   ├── api/
-│   │   └── api_router.py       – Organizes API endpoints (/api/v1)
-│   │
-│   ├── static/
-│   │   └── dashboard.html      – Simple front-end dashboard for debugging
-│   │
-│   └── mock_sender.py          – Sends fake telemetry for testing
+### ✅ Real-time telemetry ingestion
+- The helmet / mobile pipeline sends telemetry to a WebSocket endpoint.
+- Incoming data is validated using Pydantic schemas.
+- Messages are queued and written to the database by a background worker (so WebSockets stay fast).
 
-├── helmet.db                   – SQLite database (auto-created)
-├── .env                        – Optional: DATABASE_URL, Firebase, ML paths
-└── README.md
+### ✅ Live streaming to the dashboard
+- Authenticated users connect to a streaming WebSocket endpoint.
+- The backend broadcasts telemetry + computed risk status to the connected user in near real time.
+- Throttling is applied to avoid flooding the client.
 
+### ✅ Risk & crash logic (server-side)
+- **Risk assessor** analyzes a rolling telemetry window and produces a live `RISK_STATUS` feed:
+  - speeding
+  - swerving patterns (gyro)
+  - sudden movement spikes (accel)
+  - high heart rate
+- **Crash pipeline** uses a state machine + window buffering and is ready for ONNX inference integration.
 
----------------------------------------------------
-Main Features
----------------------------------------------------
+### ✅ Database support
+- Works with **MySQL (production)** and can also use **SQLite (local dev/testing)** depending on your `DATABASE_URL`.
+- Telemetry is stored in a flat DB-friendly format for fast reads and charting.
 
-1. Real-time Telemetry Ingestion  
-   • /ws/ingest receives live telemetry:  
-     - GPS  
-     - Speed  
-     - Accelerometer / Gyroscope  
-     - Heart rate (planned)  
-     - Stress levels (planned)  
-     - Crash-probability signals (ML, planned)  
+---
 
-   • Telemetry is validated, queued, saved to DB, and broadcast.
+## Quick start (local)
 
-2. Real-time Dashboard Updates  
-   • /ws/stream pushes live updates to the authenticated user  
-   • Used for live map tracking, live speed, crash alerts, trip progress  
-   • Works with static/dashboard.html
+### 1) Install dependencies
+```bash
+pip install -r app/requirements.txt
+```
 
-3. Background Workers  
-   • Persist Worker → Saves telemetry + trip events without blocking WebSockets  
-   • ML Worker (future) → Runs crash detection model and sends alerts
+### 2) Configure environment
+Create a `.env` file (or export variables):
 
-4. Database Flexibility  
-   • SQLite (default local development)  
-   • MySQL/Postgres (optional for production)
+```env
+DATABASE_URL=mysql+aiomysql://USER:PASSWORD@localhost:3306/helmet_db
+FIREBASE_CREDENTIALS_PATH=app/firebase/serviceAccountKey.json
+```
 
----------------------------------------------------
-Local Development
----------------------------------------------------
+> If you don’t set `DATABASE_URL`, the backend can be configured to use SQLite depending on your connection settings.
 
-1. Install dependencies:
-   pip install -r requirements.txt
+### 3) Run the server
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --workers 1
+```
 
-2. Start FastAPI server:
-   uvicorn app.main:app --reload
+**Important:** keep `--workers 1` because the persistence worker + in-memory state (trip/risk buffers) must run in a single process.
 
-3. Open API documentation:
-   http://127.0.0.1:8000/docs
+### 4) Open the API docs
+- `http://127.0.0.1:8000/docs`
 
-4. View live dashboard:
-   http://127.0.0.1:8000/static/dashboard.html
+### 5) Open the dashboard
+- `http://127.0.0.1:8000/static/dashboard.html`
 
+---
 
----------------------------------------------------
-WebSocket Endpoints
----------------------------------------------------
+## WebSocket endpoints
 
-1. ws://host/ws/ingest  
-   → Helmet/mobile app sends telemetry here
+### Telemetry ingest (device → backend)
+`ws://127.0.0.1:8000/ws/ingest`
 
-2. ws://host/ws/stream?token=USER_TOKEN  
-   → Dashboard receives real-time updates
+The sender posts:
+- `trip_start`
+- `telemetry`
+- `trip_end`
 
+The server replies with an ACK message per frame (used by the mock sender).
 
----------------------------------------------------
-Simulate Telemetry (for testing)
----------------------------------------------------
+### Live stream (backend → user dashboard)
+`ws://127.0.0.1:8000/ws/stream?token=FIREBASE_ID_TOKEN`
 
-Run:
-   python app/mock_sender.py
+After auth, the backend streams:
+- raw telemetry (throttled)
+- `RISK_STATUS`
+- critical alerts when triggered (e.g., crash)
 
-This sends random telemetry events to /ws/ingest.
+---
 
+## Simulate a full ride (recommended demo)
 
----------------------------------------------------
-Authentication
----------------------------------------------------
+You can simulate a realistic motorcycle ride using the included mock sender:
 
-• Firebase token verification supported  
-• When Firebase credentials are missing → backend switches to MOCK MODE  
-  (useful for development and Burp testing)
+```bash
+export BACKEND_URL="http://127.0.0.1:8000"
+export DEVICE_ID="helmet_01"
+export TEST_TOKEN="YOUR_FIREBASE_ID_TOKEN"
+python app/mock_sender.py
+```
 
+The simulation covers normal riding behavior and progressively introduces:
+- speeding
+- high heart rate
+- swerving / aggressive IMU patterns
+- and can generate a crash flag window
 
----------------------------------------------------
-Roadmap / Future Work
----------------------------------------------------
+This is perfect for demos because it produces believable data and triggers risk states naturally.
 
-• ONNX crash detection model  
-• Trip summary statistics  
-• User health analytics  
-• Admin dashboard (graphs, maps, logs)  
-• Push notifications for crash detection  
-• More advanced sensor classification
+---
+
+## Authentication
+
+This backend uses **Firebase ID token verification** for user authentication.
+
+- REST endpoints require `Authorization: Bearer <token>`
+- `/ws/stream` expects `?token=<token>`
+
+If Firebase credentials are missing or invalid, token verification will fail (expected behavior for secure mode).
+
+---
+
+## Why the architecture is built this way
+
+- **WebSockets must stay responsive** → telemetry persistence happens in a background queue worker.
+- **Database writes are continuous** → storing telemetry in a flat structure keeps inserts fast and queries simple.
+- **Risk/crash detection needs context** → rolling buffers allow analysis using recent time windows instead of single frames.
+- **Single-process worker design** → ensures consistent in-memory state for trip tracking and detection logic.
+
+---
+
+## Roadmap (next improvements)
+- Add trip summary aggregation (avg/max speed, distance, HR averages)
+- Add ONNX crash inference model training + evaluation
+- Add push notifications / emergency contact flow
+- Add role-based user/device ownership management for production
+- Add charts + richer dashboard UI
+
+---
+
+## License
+This project is currently for academic/capstone use. Add a license file if you plan to open-source it.
