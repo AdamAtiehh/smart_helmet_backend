@@ -29,8 +29,7 @@ class RiskAssessor:
         
         latest_msg = window_msgs[-1]
 
-        # 1. Aggressive Maneuvers (IMU)
-        # Check aggressive behavior in the window
+        # 1. Aggressive Maneuvers (IMU), Check aggressive behavior in the window
         high_gyro_count = 0
         accel_spike_detected = False
 
@@ -40,7 +39,7 @@ class RiskAssessor:
             # Gyro magnitude
             gx, gy, gz = imu.get("gx", 0.0), imu.get("gy", 0.0), imu.get("gz", 0.0)
             gyro_mag = math.sqrt(gx**2 + gy**2 + gz**2)
-            if gyro_mag > 3.5:  # Arbitrary threshold (adjust based on data)
+            if gyro_mag > 3.5:
                 high_gyro_count += 1
             
             # Accel magnitude
@@ -58,8 +57,7 @@ class RiskAssessor:
             score += 20
             reasons.append("sudden_movement")
 
-        # 2. Speeding (Unified Source)
-        # Use util that prefers velocity.kmh > GPS delta
+        # 2. Speeding (Unified Source), Use util that prefers velocity.kmh > GPS delta
         speed_kmh = get_speed_kmh(latest_msg, last_gps)
         
         if speed_kmh is not None:

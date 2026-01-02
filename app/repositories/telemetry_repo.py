@@ -44,8 +44,6 @@ async def insert_trip_data(
         lat=lat,
         lng=lng,
         speed_kmh=speed_kmh,
-        # speed=speed,
-        # accuracy=accuracy,
         acc_x=acc_x,
         acc_y=acc_y,
         acc_z=acc_z,
@@ -55,7 +53,8 @@ async def insert_trip_data(
         heart_rate=heart_rate,
         # impact_g=impact_g,
         # battery_pct=battery_pct,
-        crash_flag=bool(crash_flag) if crash_flag is not None else None,
+        crash_flag=crash_flag
+
     )
     db.add(row)
     await db.flush()  # populate data_id
@@ -87,7 +86,7 @@ async def bulk_insert_trip_data(
     if not batch:
         return 0
     await db.execute(insert(TripData), batch)
-    # caller decides when to commit
+    await db.flush()
     return len(batch)
 
 
@@ -122,7 +121,7 @@ async def get_range_for_device(
         .where(
             TripData.device_id == device_id,
             TripData.timestamp >= start,
-            TripData.timestamp <= end,
+            TripData.timestamp < end,
         )
         .order_by(TripData.timestamp.asc())
         .limit(limit)
@@ -144,7 +143,7 @@ async def get_range_for_trip(
     if start is not None:
         conds.append(TripData.timestamp >= start)
     if end is not None:
-        conds.append(TripData.timestamp <= end)
+        conds.append(TripData.timestamp < end)
 
     q = (
         select(TripData)

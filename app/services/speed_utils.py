@@ -36,13 +36,20 @@ def get_speed_kmh(telemetry_msg: Dict[str, Any], last_gps_msg: Optional[Dict[str
 
     # 2. GPS Fallback
     current_gps = telemetry_msg.get("gps")
-    if (last_gps_msg and current_gps and 
-        current_gps.get("ok") and 
-        last_gps_msg.get("lat") is not None and current_gps.get("lat") is not None):
+    if (
+            last_gps_msg
+    and current_gps
+    and current_gps.get("ok")
+    and last_gps_msg.get("ok", True)  # allow old dicts without ok
+    and last_gps_msg.get("lat") is not None
+    and last_gps_msg.get("lng") is not None
+    and current_gps.get("lat") is not None
+    and current_gps.get("lng") is not None
+    ):
         
         try:
             # Parse timestamps if string, or assume objects
-            # TelemetryIn converts ts to datetime, but here we might work with dicts
+            # TelemetryIn converts ts to datetime, but here we might work with dictsdicts
             ts1 = last_gps_msg.get("ts")
             ts2 = telemetry_msg.get("ts")
             

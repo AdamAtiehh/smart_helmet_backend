@@ -20,7 +20,6 @@ async def list_my_alerts(
     """
     List recent alerts for the current user.
     """
-    # Resolve internal user_id
     user = await UsersRepo.create_user(db, firebase_uid=uid)
     
     alerts = await recent_for_user(db, user.user_id, limit=limit)
@@ -35,7 +34,6 @@ async def acknowledge_alert(
     """
     Acknowledge (resolve) an alert.
     """
-    # Resolve internal user_id
     user = await UsersRepo.create_user(db, firebase_uid=uid)
 
     alert = await get_by_id(db, alert_id)

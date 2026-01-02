@@ -16,6 +16,7 @@ from sqlalchemy import select
 from app.database.connection import get_db
 from app.models.schemas import AuthUser
 from app.models.db_models import User
+from sqlalchemy.exc import IntegrityError
 
 
 # Initialize Firebase Admin SDK
@@ -66,37 +67,43 @@ async def verify_firebase_token(token: str) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-
 async def _get_or_create_user(
     db: AsyncSession,
     *,
     firebase_uid: str,
     email_from_token: Optional[str],
 ) -> User:
-    """
-    DB is the source of truth for profile fields.
-    This function only ensures the user row exists and optionally fills missing email.
-    """
     result = await db.execute(select(User).where(User.firebase_uid == firebase_uid))
     user = result.scalar_one_or_none()
 
     if user is None:
-        user = User(
-            firebase_uid=firebase_uid,
-            email=email_from_token,   # ok if None
-            # display_name / phone_number stay NULL until user sets them via /users/me
-        )
+        user = User(firebase_uid=firebase_uid, email=email_from_token)
         db.add(user)
-        await db.commit()
-        await db.refresh(user)
-        return user
 
-    # Optional: only fill email if DB is missing it.
+        try:
+            await db.commit()
+            await db.refresh(user)
+            return user
+        except IntegrityError:
+            # Another request created the same user at the same time
+            await db.rollback()
+            result = await db.execute(select(User).where(User.firebase_uid == firebase_uid))
+            user = result.scalar_one_or_none()
+            if user is None:
+                # super rare, but don't hide it
+                raise
+            return user
+
+    # Only fill email if missing (optional)
     if email_from_token and not user.email:
         user.email = email_from_token
         db.add(user)
-        await db.commit()
-        await db.refresh(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+        except IntegrityError:
+            # If email is unique and conflicts, don't crash auth
+            await db.rollback()
 
     return user
 

@@ -133,24 +133,27 @@ class DevicesRepo:
 
     @staticmethod
     async def create_device(
-        db: AsyncSession, 
-        device_id: str, 
+        db: AsyncSession,
+        device_id: str,
         user_id: Optional[str] = None,
         model_name: Optional[str] = None,
         device_serial: Optional[str] = None
     ) -> Device:
         dev = Device(
-            device_id=device_id, 
-            user_id=user_id, 
-            model_name=model_name, 
+            device_id=device_id,
+            user_id=user_id,
+            model_name=model_name,
             device_serial=device_serial
         )
         db.add(dev)
-        
+
+        # make sure the INSERT is visible before claim_device_to_user runs SELECT
+        await db.flush()
+
         if user_id:
-            # Also link in user_devices table
+            # also link in user_devices table + ensure Device.user_id is set
             await claim_device_to_user(db, user_id, device_id, role="owner")
-            
+
         await db.commit()
         await db.refresh(dev)
         return dev
@@ -165,7 +168,7 @@ class DevicesRepo:
         stmt = update(Device).where(Device.device_id == device_id)
         values = {}
         if user_id is not None:
-            values["user_id"] = user_id
+            pass
         if model_name is not None:
             values["model_name"] = model_name
             

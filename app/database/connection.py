@@ -1,34 +1,28 @@
+# app/database/connection.py
 from __future__ import annotations
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import text
+
+load_dotenv(override=True)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./helmet.db").strip()
+
+engine: AsyncEngine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=1800,  # helps MySQL reconnects
 )
-from sqlalchemy.engine.url import make_url
 
-load_dotenv()
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-DEFAULT_SQLITE_URL = "sqlite+aiosqlite:///./helmet.db"
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL).strip()
-
-def _create_engine(url: str) -> AsyncEngine:
-    make_url(url)
-    return create_async_engine(url, echo=False, pool_pre_ping=True)
-
-engine: AsyncEngine = _create_engine(DATABASE_URL)
-
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
 
 async def get_db() -> AsyncIterator[AsyncSession]:
     session: AsyncSession = AsyncSessionLocal()
@@ -41,6 +35,19 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         await session.close()
 
 get_db_context = asynccontextmanager(get_db)
+
+
+async def wait_for_db(retries: int = 30, delay: float = 2.0) -> None:
+    # Only matters for MySQL/Postgres; SQLite is always “up”
+    for _ in range(retries):
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            return
+        except Exception:
+            await asyncio.sleep(delay)
+    raise RuntimeError("Database not reachable after retries")
+
 
 async def init_db(create_all_callable=None) -> None:
     if create_all_callable is None:

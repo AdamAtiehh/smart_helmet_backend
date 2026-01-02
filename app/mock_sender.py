@@ -1,3 +1,5 @@
+#app/mock_sender.py
+
 import asyncio
 import json
 import math
@@ -8,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from typing import Optional, Tuple
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -30,6 +33,12 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 TEST_TOKEN = os.getenv("TEST_TOKEN")
 DEVICE_ID = os.getenv("DEVICE_ID")
 
+DT = float(os.getenv("DT", "0.2"))  # seconds
+
+ENABLE_CRASH = os.getenv("ENABLE_CRASH", "1").strip() not in ("0", "false", "False")
+CRASH_MIN_SECONDS = float(os.getenv("CRASH_MIN_SECONDS", "75"))
+CRASH_CHANCE_PER_TICK = float(os.getenv("CRASH_CHANCE_PER_TICK", "0.012"))
+
 # Derive WebSocket URL
 if BACKEND_URL.startswith("https://"):
     WS_BASE = BACKEND_URL.replace("https://", "wss://", 1)
@@ -39,6 +48,9 @@ else:
     WS_BASE = f"ws://{BACKEND_URL}"
 
 
+# -----------------------------
+# HTTP helper (login/register)
+# -----------------------------
 def make_request(url, method="GET", data=None, headers=None, timeout=10):
     if headers is None:
         headers = {}
@@ -64,6 +76,9 @@ def make_request(url, method="GET", data=None, headers=None, timeout=10):
         raise
 
 
+# -----------------------------
+# Geo helpers
+# -----------------------------
 def meters_to_lat(m: float) -> float:
     return m / 111_320.0
 
@@ -73,6 +88,9 @@ def meters_to_lng(m: float, at_lat: float) -> float:
     return m / denom
 
 
+# -----------------------------
+# WS ACK helper
+# -----------------------------
 async def safe_recv_ack(ws, timeout=3.0) -> str:
     """
     Your /ws/ingest sends an ACK ("✅ saved") per message.
@@ -88,6 +106,253 @@ def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
 
+# -----------------------------
+# Driving model
+# -----------------------------
+def update_speed(
+    current_kmh: float,
+    target_kmh: float,
+    dt: float,
+    accel_limit: float,
+    decel_limit: float,
+) -> float:
+    """
+    Smooth speed changes (human-like). Limits how fast speed can rise/fall per second.
+    """
+    delta = target_kmh - current_kmh
+    max_up = accel_limit * dt
+    max_down = decel_limit * dt
+
+    if delta > 0:
+        delta = min(delta, max_up)
+    else:
+        delta = max(delta, -max_down)
+
+    return current_kmh + delta
+
+
+def choose_phase(elapsed_s: float) -> Tuple[str, float, Tuple[int, int], float, float, float, Tuple[float, float]]:
+    """
+    Timeline phases:
+    - Start normal city riding
+    - Short risky/swerving segment
+    - Speeding highway segment
+    - Stress/high HR + swerving
+    - Back to normal (if no crash ended the run)
+    Returns:
+      (phase_name, base_target_speed, hr_base_range, gyro_base, gyro_noise, accel_lat, yaw_rate_range)
+    """
+    if elapsed_s < 25:
+        return ("NORMAL", 28.0, (72, 92), 0.10, 0.06, 0.35, (-0.06, 0.06))
+    if elapsed_s < 45:
+        return ("CITY", 22.0, (70, 95), 0.12, 0.07, 0.40, (-0.10, 0.10))
+    if elapsed_s < 65:
+        return ("RISKY_TILT", 36.0, (85, 110), 4.0, 1.1, 2.0, (-0.65, 0.65))
+    if elapsed_s < 90:
+        return ("SPEEDING", 92.0, (88, 115), 0.18, 0.12, 0.75, (-0.10, 0.10))
+    if elapsed_s < 120:
+        return ("STRESS_SWERVE", 44.0, (125, 160), 4.8, 1.4, 2.4, (-0.80, 0.80))
+    return ("NORMAL_AGAIN", 26.0, (72, 92), 0.10, 0.06, 0.35, (-0.06, 0.06))
+
+
+def maybe_start_event(phase: str, in_crash: bool) -> Optional[str]:
+    """
+    Random short events that make the ride feel human.
+    """
+    if in_crash:
+        return None
+
+    roll = random.random()
+
+    # More events in city; fewer on highway.
+    if phase in ("CITY", "NORMAL"):
+        if roll < 0.030:
+            return "BRAKE"
+        if roll < 0.045:
+            return "STOP"
+        if roll < 0.060:
+            return "BUMP"
+        if roll < 0.075:
+            return "OVERTAKE"
+        return None
+
+    if phase in ("SPEEDING",):
+        if roll < 0.015:
+            return "BRAKE"
+        if roll < 0.030:
+            return "OVERTAKE"
+        if roll < 0.040:
+            return "BUMP"
+        return None
+
+    # swerving segments
+    if phase in ("RISKY_TILT", "STRESS_SWERVE"):
+        if roll < 0.020:
+            return "BRAKE"
+        if roll < 0.040:
+            return "BUMP"
+        if roll < 0.060:
+            return "OVERTAKE"
+        return None
+
+    return None
+
+
+def synth_heart_rate(
+    hr_base: Tuple[int, int],
+    speed_kmh: float,
+    phase: str,
+    event_type: Optional[str],
+    in_crash: bool,
+) -> int:
+    """
+    HR is not random-only: it reacts to speed, risky phases, and events.
+    """
+    hr = int(random.uniform(hr_base[0], hr_base[1]))
+
+    # speed influence
+    hr += int((speed_kmh / 120.0) * random.uniform(0, 12))
+
+    # event influence
+    if event_type == "OVERTAKE":
+        hr += random.randint(4, 12)
+    if event_type in ("BRAKE", "STOP") and phase in ("SPEEDING", "RISKY_TILT", "STRESS_SWERVE"):
+        hr += random.randint(1, 6)
+
+    # crash influence
+    if in_crash:
+        hr = int(random.uniform(95, 145))
+
+    return int(clamp(hr, 55, 190))
+
+
+def synth_imu(
+    gyro_base: float,
+    gyro_noise: float,
+    accel_lat: float,
+    phase: str,
+    event_type: Optional[str],
+    in_crash: bool,
+    crash_first_impact: bool,
+) -> Tuple[float, float, float, float, float, float]:
+    """
+    Produces ax, ay, az, gx, gy, gz.
+    - Normal: small noise around gravity.
+    - Risky phases: higher gyro + lateral accel.
+    - BUMP: short az spike + lateral kick.
+    - Crash: big spike and chaotic rotation.
+    """
+    ax = random.uniform(-accel_lat, accel_lat)
+    ay = random.uniform(-accel_lat, accel_lat)
+    az = random.uniform(9.4, 10.2)
+
+    wiggle = math.sin(time.time() * 1.2)
+    gx = (gyro_base * wiggle) + random.uniform(-gyro_noise, gyro_noise)
+    gy = (gyro_base * (1 - abs(wiggle))) + random.uniform(-gyro_noise, gyro_noise)
+    gz = (gyro_base * 0.5 * wiggle) + random.uniform(-gyro_noise, gyro_noise)
+
+    if event_type == "BUMP":
+        ax += random.uniform(-1.5, 1.5)
+        ay += random.uniform(-1.5, 1.5)
+        az += random.uniform(0.8, 2.5)
+
+    if in_crash:
+        if crash_first_impact:
+            spike = random.uniform(12, 20)
+            ax += spike * random.choice([-1, 1])
+            ay += spike * random.choice([-1, 1])
+            az += random.uniform(-8, 8)
+
+            gx += random.uniform(6, 12)
+            gy += random.uniform(6, 12)
+            gz += random.uniform(6, 12)
+        else:
+            ax += random.uniform(-6, 6)
+            ay += random.uniform(-6, 6)
+            az += random.uniform(-6, 6)
+
+            gx += random.uniform(1.5, 6)
+            gy += random.uniform(1.5, 6)
+            gz += random.uniform(1.5, 6)
+
+    return ax, ay, az, gx, gy, gz
+
+
+def update_gps(
+    lat: float,
+    lng: float,
+    heading: float,
+    speed_kmh: float,
+    dt: float,
+    yaw_rate: float,
+    jitter_m: float = 0.8,
+) -> Tuple[float, float, float, float, float]:
+    """
+    Updates lat/lng based on speed + heading.
+    Adds small GPS jitter so it looks like a real receiver.
+    """
+    heading = heading + yaw_rate * dt
+
+    speed_mps = (speed_kmh * 1000.0) / 3600.0
+    dist_m = speed_mps * dt
+
+    dx = dist_m * math.cos(heading)  # east
+    dy = dist_m * math.sin(heading)  # north
+
+    lat = lat + meters_to_lat(dy)
+    lng = lng + meters_to_lng(dx, lat)
+
+    # jitter
+    jx = random.uniform(-jitter_m, jitter_m)
+    jy = random.uniform(-jitter_m, jitter_m)
+    lat_j = lat + meters_to_lat(jy)
+    lng_j = lng + meters_to_lng(jx, lat)
+
+    return lat, lng, heading, lat_j, lng_j
+
+
+def imu_magnitudes(ax, ay, az, gx, gy, gz) -> Tuple[float, float]:
+    acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
+    gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+    return acc_mag, gyro_mag
+
+
+def update_crash_latch(
+    *,
+    current_latch: int,
+    speed_kmh: float,
+    acc_mag: float,
+    gyro_mag: float,
+    allow_trigger: bool,
+) -> Tuple[int, bool]:
+    """
+    Calculates crash_flag based on IMU pattern and latches it for a few frames.
+    Why latch? Real systems often keep a trigger high briefly so downstream logic
+    doesn't miss it because of timing.
+    """
+    # If already latched, keep it for remaining frames
+    if current_latch > 0:
+        return current_latch - 1, True
+
+    if not allow_trigger:
+        return 0, False
+
+    # A simple "impact-like" condition:
+    # - accel magnitude jumps high (normal is ~9.8 m/s^2)
+    # - gyro magnitude also high (rotation/chaos)
+    # - speed is non-trivial
+    trigger = (acc_mag > 16.0 and gyro_mag > 5.0 and speed_kmh > 8.0)
+
+    if trigger:
+        latch_frames = 4  # about 0.8s at DT=0.2
+        return latch_frames - 1, True
+
+    return 0, False
+
+
+# -----------------------------
+# Main
+# -----------------------------
 async def main():
     if not TEST_TOKEN:
         print("❌ ERROR: TEST_TOKEN environment variable is required.")
@@ -129,28 +394,31 @@ async def main():
     uri = f"{WS_BASE}/ws/ingest"
     print(f"Connecting to {uri}...")
 
-    DT = 0.2  # sampling interval (seconds)
-
     # GPS init (Lebanon-ish)
     lat = 33.8547
     lng = 35.8623
     heading = random.uniform(0, 2 * math.pi)
 
-    # Crash segment (optional)
-    crash_start = 260
-    crash_len = 10
-    crash_flag_len = 4
-
-    # "Human driving" state
+    # Speed state
     current_speed_kmh = 0.0
     speed_noise_phase = random.uniform(0, 2 * math.pi)
 
-    # Random driving events (brake / stop / bump / quick-accelerate)
-    event_type = None
-    event_until_i = -1
+    # Event state
+    event_type: Optional[str] = None
+    event_until_ts = 0.0
 
-    # Slightly noisy GPS (like real receivers)
-    gps_jitter_m = 0.8  # ~0.8m jitter
+    # Crash director
+    crash_active = False
+    crash_started_ts = 0.0
+    crash_duration_s = 2.0
+    crashed_once = False
+
+    # crash_flag latch
+    crash_latch = 0
+
+    # for print formatting
+    tick = 0
+    start_time = time.time()
 
     ws = None
     try:
@@ -160,7 +428,7 @@ async def main():
             ping_interval=20,
             ping_timeout=20,
         ) as ws:
-            # Send trip_start
+            # trip_start
             start_msg = {
                 "type": "trip_start",
                 "device_id": DEVICE_ID,
@@ -170,220 +438,131 @@ async def main():
             ack = await safe_recv_ack(ws)
             print(f"Sent trip_start: {ack}")
 
-            i = 0
             while not STOP:
+                now = time.time()
+                elapsed_s = now - start_time
+
                 ts_iso = datetime.now(timezone.utc).isoformat()
 
-                # Crash window flags (based only on i)
-                in_crash = crash_start <= i < (crash_start + crash_len)
-                in_flag = crash_start <= i < (crash_start + crash_flag_len)
+                # Phase
+                phase, base_target, hr_base, gyro_base, gyro_noise, accel_lat, yaw_rng = choose_phase(elapsed_s)
 
-                # -----------------------------
-                # PHASES (scenario-level behavior)
-                # -----------------------------
-                # Note: these are BASE targets, we still add “human” variation below.
-                if i < 50:
-                    phase = "NORMAL"
-                    target_speed_kmh = 32
-                    hr_base = (75, 95)
-                    gyro_base = 0.10
-                    gyro_noise = 0.06
-                    accel_lat = 0.35
-                    yaw_rate = random.uniform(-0.06, 0.06)
+                # Start/expire events
+                if (event_type is None) or (now >= event_until_ts):
+                    event_type = maybe_start_event(phase, crash_active)
+                    if event_type == "BRAKE":
+                        event_until_ts = now + random.uniform(1.2, 2.8)
+                    elif event_type == "STOP":
+                        event_until_ts = now + random.uniform(2.5, 6.0)
+                    elif event_type == "OVERTAKE":
+                        event_until_ts = now + random.uniform(1.6, 3.6)
+                    elif event_type == "BUMP":
+                        event_until_ts = now + random.uniform(0.2, 0.6)
+                    else:
+                        event_until_ts = now
 
-                elif i < 100:
-                    phase = "RISKY_TILT"
-                    target_speed_kmh = 35
-                    hr_base = (85, 110)
-                    gyro_base = 4.0
-                    gyro_noise = 1.1
-                    accel_lat = 2.0
-                    yaw_rate = random.uniform(-0.65, 0.65)
-
-                elif i < 150:
-                    phase = "SPEEDING"
-                    target_speed_kmh = 88
-                    hr_base = (85, 110)
-                    gyro_base = 0.18
-                    gyro_noise = 0.12
-                    accel_lat = 0.75
-                    yaw_rate = random.uniform(-0.10, 0.10)
-
-                elif i < 200:
-                    phase = "HIGH_HR"
-                    target_speed_kmh = 38
-                    hr_base = (125, 155)
-                    gyro_base = 0.14
-                    gyro_noise = 0.08
-                    accel_lat = 0.45
-                    yaw_rate = random.uniform(-0.07, 0.07)
-
-                elif i < 250:
-                    phase = "DANGEROUS"
-                    target_speed_kmh = 105
-                    hr_base = (130, 165)
-                    gyro_base = 6.0
-                    gyro_noise = 2.2
-                    accel_lat = 3.5
-                    yaw_rate = random.uniform(-0.95, 0.95)
-
-                else:
-                    phase = "NORMAL_AGAIN"
-                    target_speed_kmh = 28
-                    hr_base = (75, 95)
-                    gyro_base = 0.10
-                    gyro_noise = 0.06
-                    accel_lat = 0.35
-                    yaw_rate = random.uniform(-0.06, 0.06)
-
-                # -----------------------------
-                # Random event generator (more “human”)
-                # - short brake
-                # - red-light stop
-                # - small bump/pothole
-                # - quick accelerate (overtake)
-                # -----------------------------
-                if event_type is None or i > event_until_i:
-                    event_type = None
-                    # Don’t spam events; keep them rare
-                    roll = random.random()
-                    if not in_crash:
-                        if roll < 0.015:
-                            event_type = "BRAKE"
-                            event_until_i = i + random.randint(6, 14)  # ~1.2–2.8s
-                        elif roll < 0.025:
-                            event_type = "STOP"
-                            event_until_i = i + random.randint(12, 30)  # ~2.4–6s
-                        elif roll < 0.040:
-                            event_type = "OVERTAKE"
-                            event_until_i = i + random.randint(8, 18)  # ~1.6–3.6s
-                        elif roll < 0.060:
-                            event_type = "BUMP"
-                            event_until_i = i + random.randint(1, 3)  # ~0.2–0.6s
-
-                # Apply event effects to target speed
+                # Target speed changes from events
+                target_speed_kmh = base_target
                 if event_type == "BRAKE":
-                    target_speed_kmh = max(0, target_speed_kmh - random.uniform(12, 22))
+                    target_speed_kmh = max(0.0, target_speed_kmh - random.uniform(12, 22))
                 elif event_type == "STOP":
-                    target_speed_kmh = 0
+                    target_speed_kmh = 0.0
                 elif event_type == "OVERTAKE":
                     target_speed_kmh = target_speed_kmh + random.uniform(8, 18)
-                # BUMP doesn’t change speed target, it changes IMU later
 
-                # If crash: force speed target down hard
-                if in_crash:
-                    target_speed_kmh = 0
+                # Crash logic: maybe trigger once during risky driving
+                risky_now = phase in ("RISKY_TILT", "SPEEDING", "STRESS_SWERVE")
+                if (
+                    ENABLE_CRASH
+                    and not crashed_once
+                    and not crash_active
+                    and elapsed_s >= CRASH_MIN_SECONDS
+                    and risky_now
+                ):
+                    # A tiny per-tick chance makes it feel "might happen"
+                    if random.random() < CRASH_CHANCE_PER_TICK:
+                        crash_active = True
+                        crash_started_ts = now
+                        crashed_once = True
 
-                # -----------------------------
-                # Smooth velocity (ramp up/down)
-                # -----------------------------
-                accel_limit = 10.0   # km/h per second
-                decel_limit = 14.0   # braking is usually faster
+                # If crash active: force target speed down hard
+                if crash_active:
+                    target_speed_kmh = 0.0
 
-                if phase in ("SPEEDING", "DANGEROUS"):
+                # Accel/decel limits (phase & events)
+                accel_limit = 10.0
+                decel_limit = 14.0
+                if phase in ("SPEEDING",):
                     accel_limit = 14.0
                     decel_limit = 18.0
-
+                if phase in ("RISKY_TILT", "STRESS_SWERVE"):
+                    accel_limit = 12.0
+                    decel_limit = 18.0
                 if event_type in ("BRAKE", "STOP"):
                     decel_limit = 22.0
-
-                if in_crash:
+                if crash_active:
                     decel_limit = 40.0
 
-                delta = target_speed_kmh - current_speed_kmh
-                max_up = accel_limit * DT
-                max_down = decel_limit * DT
+                # Smooth speed update
+                current_speed_kmh = update_speed(
+                    current_speed_kmh,
+                    target_speed_kmh,
+                    DT,
+                    accel_limit,
+                    decel_limit,
+                )
 
-                if delta > 0:
-                    delta = min(delta, max_up)
-                else:
-                    delta = max(delta, -max_down)
-
-                current_speed_kmh += delta
-
-                # Small realistic wobble + noise
-                wobble = 1.0 * math.sin(i * 0.15 + speed_noise_phase) + random.uniform(-0.8, 0.8)
+                # Natural wobble/noise
+                wobble = 1.0 * math.sin(tick * 0.15 + speed_noise_phase) + random.uniform(-0.8, 0.8)
                 current_speed_kmh = max(0.0, current_speed_kmh + wobble)
-
-                # Clamp
                 current_speed_kmh = min(current_speed_kmh, 160.0)
 
-                # -----------------------------
-                # Heart rate: loosely correlated with risk + speed + events
-                # -----------------------------
-                hr = int(random.uniform(hr_base[0], hr_base[1]))
+                # HR
+                hr = synth_heart_rate(hr_base, current_speed_kmh, phase, event_type, crash_active)
 
-                # Add a small speed influence
-                hr += int((current_speed_kmh / 120.0) * random.uniform(0, 12))
+                # Yaw rate
+                yaw_rate = random.uniform(yaw_rng[0], yaw_rng[1])
 
-                # Events can spike HR a bit
-                if event_type == "OVERTAKE":
-                    hr += random.randint(3, 10)
-                if in_crash:
-                    hr = int(random.uniform(95, 140))
+                # IMU
+                crash_first_impact = crash_active and (now - crash_started_ts) < DT
+                ax, ay, az, gx, gy, gz = synth_imu(
+                    gyro_base,
+                    gyro_noise,
+                    accel_lat,
+                    phase,
+                    event_type,
+                    crash_active,
+                    crash_first_impact,
+                )
 
-                hr = int(clamp(hr, 55, 190))
+                # Magnitudes for crash_flag calculation
+                acc_mag, gyro_mag = imu_magnitudes(ax, ay, az, gx, gy, gz)
 
-                # -----------------------------
-                # IMU baseline
-                # -----------------------------
-                ax = random.uniform(-accel_lat, accel_lat)
-                ay = random.uniform(-accel_lat, accel_lat)
-                az = random.uniform(9.4, 10.2)
+                # End crash after duration (but you’ll still see some chaotic IMU in that window)
+                if crash_active and (now - crash_started_ts) >= crash_duration_s:
+                    crash_active = False
 
-                wiggle = math.sin(i * 0.2)
-                gx = (gyro_base * wiggle) + random.uniform(-gyro_noise, gyro_noise)
-                gy = (gyro_base * (1 - abs(wiggle))) + random.uniform(-gyro_noise, gyro_noise)
-                gz = (gyro_base * 0.5 * wiggle) + random.uniform(-gyro_noise, gyro_noise)
+                # Calculate + latch crash_flag from IMU pattern
+                crash_latch, crash_flag = update_crash_latch(
+                    current_latch=crash_latch,
+                    speed_kmh=current_speed_kmh,
+                    acc_mag=acc_mag,
+                    gyro_mag=gyro_mag,
+                    allow_trigger=True,
+                )
 
-                # Human-like small bumps
-                if event_type == "BUMP":
-                    ax += random.uniform(-1.5, 1.5)
-                    ay += random.uniform(-1.5, 1.5)
-                    az += random.uniform(0.8, 2.5)  # upward spike
+                # GPS update
+                lat, lng, heading, lat_j, lng_j = update_gps(
+                    lat,
+                    lng,
+                    heading,
+                    current_speed_kmh,
+                    DT,
+                    yaw_rate,
+                    jitter_m=0.8,
+                )
 
-                # Crash: inject impact spike + chaos
-                if in_crash:
-                    phase = "CRASH"
-                    if i == crash_start:
-                        spike = random.uniform(12, 20)
-                        ax += spike * random.choice([-1, 1])
-                        ay += spike * random.choice([-1, 1])
-                        az += random.uniform(-8, 8)
-
-                        gx += random.uniform(6, 12)
-                        gy += random.uniform(6, 12)
-                        gz += random.uniform(6, 12)
-                    else:
-                        ax += random.uniform(-6, 6)
-                        ay += random.uniform(-6, 6)
-                        az += random.uniform(-6, 6)
-
-                        gx += random.uniform(1.5, 6)
-                        gy += random.uniform(1.5, 6)
-                        gz += random.uniform(1.5, 6)
-
-                # -----------------------------
-                # GPS movement based on *current_speed_kmh*
-                # -----------------------------
-                # Turning slightly depends on speed (faster -> smoother direction changes)
-                heading += yaw_rate * DT
-
-                speed_mps = (current_speed_kmh * 1000.0) / 3600.0
-                dist_m = speed_mps * DT
-
-                dx = dist_m * math.cos(heading)  # east (m)
-                dy = dist_m * math.sin(heading)  # north (m)
-
-                lat += meters_to_lat(dy)
-                lng += meters_to_lng(dx, lat)
-
-                # GPS jitter (meters -> lat/lng)
-                jx = random.uniform(-gps_jitter_m, gps_jitter_m)
-                jy = random.uniform(-gps_jitter_m, gps_jitter_m)
-                lat_j = lat + meters_to_lat(jy)
-                lng_j = lng + meters_to_lng(jx, lat)
-
+                # Build message
                 msg = {
                     "ts": ts_iso,
                     "type": "telemetry",
@@ -415,26 +594,31 @@ async def main():
                         "sats": 8,
                         "lock": True,
                     },
-                    "velocity": {
-                        "kmh": float(round(current_speed_kmh, 2))
-                    },
-                    "crash_flag": bool(in_flag),
+                    "velocity": {"kmh": float(round(current_speed_kmh, 2))},
+                    "crash_flag": bool(crash_flag),
                 }
 
                 await ws.send(json.dumps(msg))
                 ack = await safe_recv_ack(ws)
 
                 ev = event_type if event_type else "-"
+                if crash_active:
+                    phase_print = "CRASH"
+                else:
+                    phase_print = phase
+
                 print(
-                    f"[{phase:12}] i={i:03d} v={current_speed_kmh:6.1f} km/h "
-                    f"(target={target_speed_kmh:>5.1f}) ev={ev:8} "
-                    f"hr={hr:>3} crash_flag={bool(in_flag)} -> {ack}"
+                    f"[{phase_print:12}] t={elapsed_s:6.1f}s i={tick:04d} "
+                    f"v={current_speed_kmh:6.1f} km/h (target={target_speed_kmh:>5.1f}) "
+                    f"ev={ev:8} hr={hr:>3} "
+                    f"acc={acc_mag:5.1f} gyro={gyro_mag:5.1f} "
+                    f"crash_flag={bool(crash_flag)} -> {ack}"
                 )
 
-                i += 1
+                tick += 1
                 await asyncio.sleep(DT)
 
-            # graceful trip_end
+            # trip_end
             end_msg = {
                 "type": "trip_end",
                 "device_id": DEVICE_ID,
@@ -446,7 +630,6 @@ async def main():
 
     except ConnectionClosed as e:
         print(f"❌ WebSocket closed by server: code={e.code}, reason={e.reason}")
-        # Try to send trip_end if possible (often you can’t after close)
         try:
             if ws is not None:
                 end_msg = {
@@ -463,3 +646,45 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+"""
+app/mock_sender.py
+
+Simulates a realistic motorcycle ride and streams telemetry into your backend
+via /ws/ingest. The ride starts normal, then includes some speeding / swerving /
+high HR, and may trigger a crash event where `crash_flag` is CALCULATED from IMU.
+
+---------------------------------------------------------------------------
+| Function / Section           | What it does                                |
+|-----------------------------|----------------------------------------------|
+| make_request()              | Calls HTTP endpoints (login, device register)|
+| safe_recv_ack()             | Reads the "✅ saved" ACK with a timeout       |
+| meters_to_lat / meters_to_lng | Converts meters to lat/lng deltas          |
+| update_speed()              | Smooth acceleration/deceleration model       |
+| choose_phase()              | Timeline-based driving behavior              |
+| maybe_start_event()         | Random driving events (brake/stop/overtake)  |
+| synth_heart_rate()          | HR varies with phase/speed/events/crash      |
+| synth_imu()                 | IMU varies with phase/events + crash spikes  |
+| update_gps()                | GPS moves based on current speed + jitter    |
+| update_crash_latch()        | Calculates/latches crash_flag from IMU        |
+| main()                      | Orchestrates everything + websocket streaming |
+---------------------------------------------------------------------------
+
+---------------------------------------------------------------------------
+| Important knobs (env vars)  | Default | Meaning                             |
+|-----------------------------|---------|--------------------------------------|
+| BACKEND_URL                 | 127.0.0.1:8000 | Backend HTTP base URL       |
+| TEST_TOKEN                  | (required) | Firebase ID token for /users/me |
+| DEVICE_ID                   | (required) | Device identifier             |
+| DT                          | 0.2     | Sampling interval in seconds         |
+| ENABLE_CRASH                | 1       | 1=may crash, 0=never crash           |
+| CRASH_MIN_SECONDS           | 75      | Earliest time a crash can happen     |
+| CRASH_CHANCE_PER_TICK       | 0.012   | Chance per tick during risky driving |
+---------------------------------------------------------------------------
+
+Notes:
+- `velocity.kmh` is always sent (your RiskAssessor will use it first).
+- `crash_flag` is NOT hardcoded by index anymore: it is calculated and latched
+  for a few frames when IMU indicates a realistic impact pattern.
+"""

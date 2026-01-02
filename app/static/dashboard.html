@@ -350,12 +350,6 @@
         const urlParams = new URLSearchParams(window.location.search);
         let TOKEN = urlParams.get('token');
 
-        // ws.onmessage = (event) => {
-        //     console.log("WS RAW:", event.data);   // <--- add this
-        //     const data = JSON.parse(event.data);
-        //     updateDashboard(data);
-        // };
-
         // 2. If not in URL, try localStorage (optional, but good for refresh)
         if (!TOKEN) {
             TOKEN = localStorage.getItem('helmet_token');

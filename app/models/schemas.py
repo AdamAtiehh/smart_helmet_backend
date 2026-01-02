@@ -111,7 +111,6 @@ class TripEndIn(BaseModel):
     type: Literal["trip_end"]
     device_id: str
     ts: datetime
-    ts: datetime
 
     @field_validator("ts", mode="before")
     @classmethod
@@ -141,7 +140,7 @@ class TelemetryIn(BaseModel):
     imu: IMUData
     gps: GPSData
     velocity: Optional[VelocityData] = None
-    crash_flag: bool
+    crash_flag: Optional[bool] = None
     trip_id: Optional[str] = None
 
     @field_validator("velocity")
@@ -269,76 +268,65 @@ class TripDataRead(BaseModel):
     trip_id: Optional[str] = None
     device_id: str
     timestamp: datetime
-    
-    # Nested structures
+
     heart_rate: Optional[HeartRateData] = None
     imu: Optional[IMUData] = None
     gps: Optional[GPSData] = None
-    
-    helmet_on: Optional[bool] = None # Not in DB yet, but in JSON
+
+    helmet_on: Optional[bool] = None
     crash_flag: Optional[bool] = None
     battery_pct: Optional[float] = None
-    
     created_at: Optional[datetime] = None
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def map_flat_to_nested(cls, data: Any) -> Any:
-        # If it's a dict (already processed)
+        # If it's already a dict, just pass through
         if isinstance(data, dict):
             return data
-            
-        # If it's an ORM object (TripData)
-        # We need to reconstruct the nested objects from flat columns
-        
-        # Helper to safely get attr
+
         def get(attr, default=None):
             return getattr(data, attr, default)
 
-        # Construct HeartRateData
+        # Heart rate (DB stores only the HR number)
         hr_val = get("heart_rate")
-        # Note: DB only stores 'heart_rate' (int/float). 
-        # The other fields (ir, red, finger, spo2) are likely lost unless stored in raw_payload.
-        # For now, we'll populate what we have and use defaults/dummy for others if missing,
-        # OR check raw_payload if available.
-        
-        # raw = get("raw_payload") or {}
-        
-        # Try to get full HR data from raw_payload if it exists, else partial
         hr_data = None
-        if "heart_rate" in raw and isinstance(raw["heart_rate"], dict):
-             hr_data = raw["heart_rate"]
-        elif hr_val is not None:
-            # Reconstruct partial
+        if hr_val is not None:
             hr_data = {
                 "ok": True,
-                "ir": 0, "red": 0, "finger": True, "spo2": 0,
-                "hr": int(hr_val)
-            }
-            
-        # Construct IMUData
-        imu_data = None
-        if "imu" in raw and isinstance(raw["imu"], dict):
-            imu_data = raw["imu"]
-        elif get("acc_x") is not None:
-            imu_data = {
-                "ok": True, "sleep": False,
-                "ax": get("acc_x", 0.0), "ay": get("acc_y", 0.0), "az": get("acc_z", 0.0),
-                "gx": get("gyro_x", 0.0), "gy": get("gyro_y", 0.0), "gz": get("gyro_z", 0.0)
+                "ir": 0,
+                "red": 0,
+                "finger": True,
+                "hr": int(hr_val),
+                "spo2": 0,
             }
 
-        # Construct GPSData
+        # IMU (DB stores flat acc/gyro)
+        imu_data = None
+        if get("acc_x") is not None:
+            imu_data = {
+                "ok": True,
+                "sleep": False,
+                "ax": get("acc_x", 0.0),
+                "ay": get("acc_y", 0.0),
+                "az": get("acc_z", 0.0),
+                "gx": get("gyro_x", 0.0),
+                "gy": get("gyro_y", 0.0),
+                "gz": get("gyro_z", 0.0),
+            }
+
+        # GPS (DB stores lat/lng only)
         gps_data = None
-        if "gps" in raw and isinstance(raw["gps"], dict):
-            gps_data = raw["gps"]
-        elif get("lat") is not None:
+        if get("lat") is not None and get("lng") is not None:
             gps_data = {
                 "ok": True,
-                "lat": get("lat", 0.0), "lng": get("lng", 0.0),
-                "alt": 0.0, "sats": 0, "lock": True
+                "lat": get("lat", 0.0),
+                "lng": get("lng", 0.0),
+                "alt": 0.0,
+                "sats": 0,
+                "lock": True,
             }
 
-        # Return a dict that matches the schema
         return {
             "data_id": get("data_id"),
             "trip_id": get("trip_id"),
@@ -347,24 +335,12 @@ class TripDataRead(BaseModel):
             "heart_rate": hr_data,
             "imu": imu_data,
             "gps": gps_data,
-            "helmet_on": raw.get("helmet_on", False),
+            # since you don't store helmet_on in DB, default to None or False
+            "helmet_on": None,  # live-only, not persisted
             "crash_flag": get("crash_flag"),
+            "battery_pct": get("battery_pct"),
             "created_at": get("created_at"),
         }
-
-    @model_validator(mode="after")
-    def convert_timezones(self):
-        beirut = ZoneInfo("Asia/Beirut")
-        utc = ZoneInfo("UTC")
-        for field in ["timestamp", "created_at"]:
-            val = getattr(self, field)
-            if val is not None:
-                if val.tzinfo is None:
-                    val = val.replace(tzinfo=utc)
-                setattr(self, field, val.astimezone(beirut))
-        return self
-
-
 
 
 # --- Schemas ---
@@ -491,3 +467,12 @@ class AuthUser(BaseModel):
     email: Optional[EmailStr] = None
     display_name: Optional[str] = None
     phone_number: Optional[str] = None
+
+
+class DailyHistoryOut(BaseModel):
+    date: str
+    average_heart_rate: float
+    max_heart_rate: float
+    average_speed: float
+    total_distance: float
+    total_trips: int

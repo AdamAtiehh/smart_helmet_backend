@@ -1,16 +1,14 @@
 from __future__ import annotations
-from datetime import datetime
+
+from datetime import datetime, timedelta, date as date_cls, timezone
+from math import radians, sin, cos, sqrt, atan2
 from typing import Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.db_models import Trip
-
-from sqlalchemy import select, func  # make sure this is imported at the top
-from math import radians, sin, cos, sqrt, atan2
-from app.models.db_models import Trip, TripData  # if not already imported
-
+from app.models.db_models import Trip, TripData
+from app.models.schemas import DailyHistoryOut
 
 async def _compute_trip_stats(
     db: AsyncSession,
@@ -30,7 +28,6 @@ async def _compute_trip_stats(
     points = list(res.scalars().all())
 
     if len(points) < 2:
-        # Not enough points to compute distance/speed
         avg_hr = None
         max_hr = None
         if points and points[0].heart_rate is not None:
@@ -45,7 +42,6 @@ async def _compute_trip_stats(
             "max_heart_rate": max_hr,
         }
 
-    # Haversine distance in meters between two lat/lng pairs
     def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         R = 6371000.0  # Earth radius in meters
         phi1 = radians(lat1)
@@ -61,16 +57,12 @@ async def _compute_trip_stats(
     max_speed_kmh = 0.0
 
     prev = points[0]
-    # Updated loop with speed_kmh support
-    # We iterate and calculate speed for each segment OR use provided speed
     
     for current in points[1:]:
         seg_speed_kmh = 0.0
         
-        # 1. Prefer explicit velocity
         if current.speed_kmh is not None:
              seg_speed_kmh = float(current.speed_kmh)
-             # We still calc distance for total_distance using GPS (Req: "distance remains computed from GPS")
         
         # 2. GPS Fallback / Distance Calculation
         dist_segment_m = 0.0
@@ -86,7 +78,6 @@ async def _compute_trip_stats(
                 if dt > 0.5: # tolerate small drifts
                      seg_speed_kmh = (dist_segment_m / dt) * 3.6
         
-        # Accumulate
         total_distance_m += dist_segment_m
         if seg_speed_kmh > max_speed_kmh:
             max_speed_kmh = seg_speed_kmh
@@ -148,7 +139,7 @@ async def create_trip(
         status="recording",
     )
     db.add(trip)
-    await db.flush()  # to get trip_id populated
+    await db.flush() 
     return trip
 
 async def close_trip(
@@ -181,7 +172,6 @@ async def close_trip(
             updated_at=datetime.utcnow(),
         )
     )
-    # keep commit control at the caller level, like before
 
 async def cancel_trip(db: AsyncSession, trip_id: str, end_time: datetime) -> None:
     """Force-cancel a trip (if aborted)."""
@@ -237,8 +227,6 @@ async def list_trips_for_user(
     )
     res = await db.execute(q)
     return tuple(res.scalars().all())
-
-
 
 
 # | Function                       | What it does                                                                          | Used by              |
@@ -301,37 +289,40 @@ class TripsRepo:
         res = await db.execute(q)
         return res.scalar_one_or_none()
 
+
     @staticmethod
-    async def get_daily_aggregates(db: AsyncSession, user_id: str, date_str: str) -> dict:
-        """
-        Get aggregated stats for a specific day (date_str: YYYY-MM-DD).
-        """
-        # Cast start_time to DATE to compare with string YYYY-MM-DD
-        # or use a range check
-        
+    async def get_daily_aggregates(
+        db: AsyncSession,
+        user_id: str,
+        day: date_cls
+    ) -> DailyHistoryOut:
+        start_dt = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        end_dt = start_dt + timedelta(days=1)
+
         q = (
             select(
                 func.avg(Trip.average_heart_rate).label("avg_hr"),
                 func.max(Trip.max_heart_rate).label("max_hr"),
                 func.avg(Trip.average_speed).label("avg_speed"),
                 func.sum(Trip.total_distance).label("total_dist"),
-                func.count(Trip.trip_id).label("trip_count")
+                func.count(Trip.trip_id).label("trip_count"),
             )
             .where(
                 Trip.user_id == user_id,
-                func.date(Trip.start_time) == date_str,
-                Trip.status == "completed"
+                Trip.start_time >= start_dt,
+                Trip.start_time < end_dt,
+                Trip.status == "completed",
             )
         )
-        
+
         res = await db.execute(q)
-        row = res.one() # Should always return one row with nulls if no match
-        
-        return {
-            "date": date_str,
-            "average_heart_rate": row.avg_hr or 0.0,
-            "max_heart_rate": row.max_hr or 0.0,
-            "average_speed": row.avg_speed or 0.0,
-            "total_distance": row.total_dist or 0.0,
-            "total_trips": row.trip_count
-        }
+        row = res.one()
+
+        return DailyHistoryOut(
+            date=day.isoformat(),
+            average_heart_rate=float(row.avg_hr or 0.0),
+            max_heart_rate=float(row.max_hr or 0.0),
+            average_speed=float(row.avg_speed or 0.0),
+            total_distance=float(row.total_dist or 0.0),
+            total_trips=int(row.trip_count or 0),
+        )

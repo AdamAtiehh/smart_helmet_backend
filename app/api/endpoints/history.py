@@ -21,7 +21,7 @@ async def get_daily_history(
     # Resolve internal user_id
     user = await UsersRepo.create_user(db, firebase_uid=uid)
     
-    # Get aggregates
     # Date will be passed as YYYY-MM-DD string to repo
-    stats = await TripsRepo.get_daily_aggregates(db, user.user_id, str(date))
+    stats = await TripsRepo.get_daily_aggregates(db, user.user_id, date)
     return stats
+

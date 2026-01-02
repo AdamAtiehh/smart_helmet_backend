@@ -130,7 +130,7 @@ async def get_trip_route(
             lat=p.lat,
             lng=p.lng,
             ts=p.timestamp,
-            speed=p.speed
+            speed=p.speed_kmh
         ) for p in points
     ]
 

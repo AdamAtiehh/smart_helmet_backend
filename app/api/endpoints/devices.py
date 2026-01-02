@@ -23,7 +23,6 @@ async def list_my_devices(
     """
     List all devices owned by the current user.
     """
-    # Resolve internal user_id
     user = await UsersRepo.create_user(db, firebase_uid=uid)
     devices = await DevicesRepo.get_user_devices(db, user.user_id)
     return devices
@@ -37,14 +36,11 @@ async def register_device(
     """
     Register a new device to the user.
     """
-    # Resolve internal user_id
     user = await UsersRepo.create_user(db, firebase_uid=uid)
 
-    # Check if device exists
+    # check if device exists
     device = await DevicesRepo.get_device(db, device_in.device_id)
     if device:
-        # If device exists, check if it's already claimed? 
-        # For MVP, let's allow "claiming" it if it has no user, or just updating it.
         if device.user_id and device.user_id != user.user_id:
              raise HTTPException(status_code=400, detail="Device already registered to another user")
         
