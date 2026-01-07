@@ -1,0 +1,23 @@
+{
+  "window_samples": 10,
+  "feature_cols": [
+    "acc_mean",
+    "acc_std",
+    "acc_max",
+    "acc_min",
+    "jerk_mean",
+    "jerk_max",
+    "gyro_mean",
+    "gyro_std",
+    "gyro_max",
+    "speed_mean",
+    "speed_max",
+    "speed_min",
+    "speed_delta"
+  ],
+  "contamination": 0.01,
+  "threshold_percentile": 0.5,
+  "score_threshold": -0.01766704120397601,
+  "score_rule": "anomaly_score < score_threshold",
+  "decision_function_note": "higher=more normal, lower=more anomalous"
+}

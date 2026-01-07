@@ -476,3 +476,42 @@ class DailyHistoryOut(BaseModel):
     average_speed: float
     total_distance: float
     total_trips: int
+
+
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque
+
+
+@dataclass
+class InferenceState:
+    """
+    Per-trip in-memory state for crash inference.
+
+    Required fields used by persist_worker._handle_telemetry:
+      - ring_buffer: rolling buffer of recent telemetry dicts (each dict includes "_ts_epoch")
+      - event_until_ts: ML runs only while time.time() < event_until_ts
+      - last_infer_ts: throttle ML inference (seconds since epoch)
+      - last_gate_ts: throttle ML gating refresh (seconds since epoch)
+      - warmup_counter: number of inference windows processed (used to avoid early false alerts)
+      - anomaly_streak: consecutive anomaly windows counter
+      - last_alert_ts: last time an alert was fired (cooldown)
+      - normal_acc_max_history: history of acc_mag_max values during NORMAL windows (for adaptive thresholds)
+      - normal_gyro_max_history: history of gyro_mag_max values during NORMAL windows (for adaptive thresholds)
+    """
+
+    ring_buffer: Deque[dict] = field(default_factory=lambda: deque(maxlen=60))
+
+    # Event-mode gating (ML runs only in this time window)
+    event_until_ts: float = 0.0
+    last_infer_ts: float = 0.0
+    last_gate_ts: float = 0.0
+
+    # ML decision stability
+    warmup_counter: int = 0
+    anomaly_streak: int = 0
+    last_alert_ts: float = 0.0
+
+    # Adaptive evidence thresholds (filled only by NORMAL windows)
+    normal_acc_max_history: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
+    normal_gyro_max_history: Deque[float] = field(default_factory=lambda: deque(maxlen=200))

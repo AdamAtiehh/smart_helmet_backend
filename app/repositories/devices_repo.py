@@ -67,7 +67,7 @@ async def claim_device_to_user(
             db.add(UserDevice(user_id=user_id, device_id=device_id, role=role))
             await db.flush()  # push INSERT so IntegrityError happens here if any
         except IntegrityError:
-            await db.rollback()
+            # await db.rollback()
             # Someone else inserted concurrently; update role to be safe.
             await db.execute(
                 update(UserDevice)
@@ -157,26 +157,27 @@ class DevicesRepo:
         await db.commit()
         await db.refresh(dev)
         return dev
-
     @staticmethod
     async def update_device(
-        db: AsyncSession, 
-        device_id: str, 
+        db: AsyncSession,
+        device_id: str,
         user_id: Optional[str] = None,
         model_name: Optional[str] = None
     ) -> Device:
         stmt = update(Device).where(Device.device_id == device_id)
         values = {}
+
         if user_id is not None:
-            pass
+            values["user_id"] = user_id
+
         if model_name is not None:
             values["model_name"] = model_name
-            
+
         if values:
             await db.execute(stmt.values(**values))
-            
+
         if user_id:
-             await claim_device_to_user(db, user_id, device_id, role="owner")
-             
+            await claim_device_to_user(db, user_id, device_id, role="owner")
+
         await db.commit()
         return await get_device(db, device_id)

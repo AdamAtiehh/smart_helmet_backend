@@ -27,35 +27,56 @@ async def list_my_devices(
     devices = await DevicesRepo.get_user_devices(db, user.user_id)
     return devices
 
+
+
 @router.post("", response_model=DeviceRead)
 async def register_device(
     device_in: DeviceCreate,
     uid: str = Depends(get_current_user_uid),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
-    Register a new device to the user.
+    Pair/register device to the current user.
+    Rules:
+      - If device doesn't exist: create it and assign to user.
+      - If device exists:
+          - If already owned by this user: just update metadata (model_name/serial) if provided.
+          - If owned by another user: transfer ownership to this user (single-helmet/single-owner behavior).
     """
+    # Ensure user exists
     user = await UsersRepo.create_user(db, firebase_uid=uid)
 
-    # check if device exists
+    # Fetch device
     device = await DevicesRepo.get_device(db, device_in.device_id)
+
     if device:
+        # If device is owned by someone else, we TRANSFER it to this user
         if device.user_id and device.user_id != user.user_id:
-             raise HTTPException(status_code=400, detail="Device already registered to another user")
-        
-        # Update owner using internal user_id
-        device = await DevicesRepo.update_device(db, device_in.device_id, user_id=user.user_id)
+            # Transfer ownership (your repo should also update user_devices via claim_device_to_user)
+            device = await DevicesRepo.update_device(
+                db,
+                device_in.device_id,
+                user_id=user.user_id,
+                model_name=device_in.model_name,
+            )
+        else:
+            # Already owned by this user (or unclaimed) -> ensure it is linked to this user
+            device = await DevicesRepo.update_device(
+                db,
+                device_in.device_id,
+                user_id=user.user_id,
+                model_name=device_in.model_name,
+            )
     else:
-        # Create new device using internal user_id
+        # Create and assign to this user
         device = await DevicesRepo.create_device(
-            db, 
-            device_id=device_in.device_id, 
+            db,
+            device_id=device_in.device_id,
             user_id=user.user_id,
             model_name=device_in.model_name,
-            device_serial=device_in.device_serial
+            device_serial=getattr(device_in, "device_serial", None),
         )
-    
+
     return device
 
 @router.get("/{device_id}", response_model=DeviceRead)
