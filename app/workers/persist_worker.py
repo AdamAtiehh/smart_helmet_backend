@@ -280,21 +280,27 @@ async def _handle_telemetry(payload: TelemetryIn) -> None:
         _INFERENCE_STATE[trip_id] = InferenceState()
     inf_state = _INFERENCE_STATE[trip_id]
 
-    # --------------------------------------------------
-    # 5) DRIVING RISK PIPELINE (unchanged broadcast)
-    #    + ML gate hook (new)
-    # --------------------------------------------------
-    if trip_id not in _RISK_STATE:
-        _RISK_STATE[trip_id] = {
+  # --------------------------------------------------
+# 5) DRIVING RISK PIPELINE (fixed routing)
+# --------------------------------------------------
+
+    device_id = payload.device_id  # should exist for telemetry
+    if not device_id:
+        return  # or just skip risk
+
+    # State per DEVICE (not trip). Prevents cross-user mixing.
+    if device_id not in _RISK_STATE:
+        _RISK_STATE[device_id] = {
             "ring_buffer": deque(maxlen=20),
             "last_gps": None,
             "last_sent_ts": 0.0,
-            "user_id": device.user_id,
+            "user_id": None,
         }
 
-    risk_st = _RISK_STATE[trip_id]
-    if not risk_st["user_id"] and device.user_id:
-        risk_st["user_id"] = device.user_id
+    risk_st = _RISK_STATE[device_id]
+
+    # ✅ Always refresh the owner user_id (don’t keep stale one)
+    risk_st["user_id"] = device.user_id
 
     # Append message for risk assessor
     risk_st["ring_buffer"].append(payload.model_dump())
@@ -308,25 +314,25 @@ async def _handle_telemetry(payload: TelemetryIn) -> None:
 
         uid = risk_st["user_id"]
         if uid:
-            await manager.broadcast_to_user(uid, {"type": "RISK_STATUS", "payload": assessment})
+            await manager.broadcast_to_user(
+                uid,
+                {"type": "RISK_STATUS", "payload": assessment},
+            )
 
         # --- ML gating hook ---
-        # If RiskAssessor says "suspicious", run ML in event-mode for a short burst.
         if assessment.get("ml_gate"):
-            # avoid spamming gate refresh every tick
             last_gate = getattr(inf_state, "last_gate_ts", 0.0)
             if (now_sys - last_gate) > 2.0:
-                # keep at least 12 seconds of event mode
                 inf_state.event_until_ts = max(getattr(inf_state, "event_until_ts", 0.0), now_sys + 12.0)
                 inf_state.last_gate_ts = now_sys
 
         risk_st["last_sent_ts"] = now_sys
 
-        # Update last GPS if valid
-        if payload.gps and payload.gps.ok and payload.gps.lat:
-            risk_st["last_gps"] = {"lat": payload.gps.lat, "lng": payload.gps.lng, "ts": payload.ts}
+    # Update last GPS if valid
+    if payload.gps and payload.gps.ok and payload.gps.lat:
+        risk_st["last_gps"] = {"lat": payload.gps.lat, "lng": payload.gps.lng, "ts": payload.ts}
 
-    # --------------------------------------------------
+        # --------------------------------------------------
     # 6) CRASH DETECTION PIPELINE (event-mode + throttled)
     # --------------------------------------------------
     # Always update inference buffer (so you keep context),

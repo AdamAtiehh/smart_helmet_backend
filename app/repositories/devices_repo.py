@@ -67,7 +67,7 @@ async def claim_device_to_user(
             db.add(UserDevice(user_id=user_id, device_id=device_id, role=role))
             await db.flush()  # push INSERT so IntegrityError happens here if any
         except IntegrityError:
-            # await db.rollback()
+            await db.rollback()
             # Someone else inserted concurrently; update role to be safe.
             await db.execute(
                 update(UserDevice)

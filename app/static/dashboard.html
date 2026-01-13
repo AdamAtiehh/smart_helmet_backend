@@ -344,7 +344,7 @@
     </div>
 
     <script>
-        const API_BASE = 'https://homebred-breana-acropetally.ngrok-free.dev/api/v1';
+        const API_BASE = 'http://ec2-3-14-15-242.us-east-2.compute.amazonaws.com:8000/api/v1';
 
         // 1. Try getting token from URL
         const urlParams = new URLSearchParams(window.location.search);
@@ -367,8 +367,7 @@
         }
 
         // Connect to WebSocket with mock token
-        const WS_SCHEME = window.location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(`${WS_SCHEME}://${window.location.host}/ws/stream?token=${TOKEN}`);
+        const ws = new WebSocket(`ws://ec2-3-14-15-242.us-east-2.compute.amazonaws.com:8000/ws/stream?token=${TOKEN}`);
         const logDiv = document.getElementById('log');
         const statusDiv = document.getElementById('connectionStatus');
 
@@ -864,83 +863,6 @@
         //     updateDashboard(data);
         //     log(JSON.stringify(data, null, 2));
         // };
-
-
-        /**
- * Dashboard Listener for Smart Helmet Alerts
- * 
- * Instructions:
- * 1. Add this code to your dashboard's WebSocket onmessage handler.
- * 2. Ensure you have an element with ID 'alert-banner' hidden by default.
- * 3. Ensure 'alert-text' and 'ack-btn' exist inside the banner.
- */
-
-        // Global state to track current alert
-        let currentAlertId = null;
-
-        // WebSocket Message Handler (Partial)
-        socket.onmessage = function (event) {
-            const data = JSON.parse(event.data);
-
-            // ... existing handlers ...
-
-            // HANDLE CRASH ALERT
-            if (data.type === "ALERT_CRITICAL") {
-                console.warn("CRITICAL ALERT RECEIVED:", data.payload);
-                showCrashAlert(data.payload);
-            }
-
-            // HANDLE ACKNOWLEDGEMENT
-            if (data.type === "ALERT_ACKED") {
-                console.log("Alert Acknowledged:", data.payload);
-                hideCrashAlert();
-            }
-        };
-
-        // UI Functions
-        function showCrashAlert(payload) {
-            currentAlertId = payload.alert_id;
-
-            const banner = document.getElementById("alert-banner");
-            const text = document.getElementById("alert-text");
-            const scorePct = (payload.score * 100).toFixed(0);
-
-            text.innerText = `⚠️ ${payload.message} (Score: ${scorePct}%)`;
-            banner.style.display = "block"; // or remove 'hidden' class
-            banner.style.backgroundColor = "red";
-            banner.style.color = "white";
-        }
-
-        function hideCrashAlert() {
-            currentAlertId = null;
-            const banner = document.getElementById("alert-banner");
-            banner.style.display = "none";
-        }
-
-        // Acknowledge Button Handler
-        document.getElementById("ack-btn").addEventListener("click", async () => {
-            if (!currentAlertId) return;
-
-            try {
-                const response = await fetch(`/api/v1/alerts/${currentAlertId}/ack`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        // Replace with actual logged-in user if available, or generic placeholder
-                        resolved_by: "dashboard_user"
-                    })
-                });
-
-                if (!response.ok) {
-                    alert("Failed to acknowledge alert");
-                }
-                // Success: Wait for ALERT_ACKED websocket message to close UI
-            } catch (e) {
-                console.error("Error acking alert:", e);
-            }
-        });
 
     </script>
 
